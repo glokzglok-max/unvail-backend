@@ -7,8 +7,9 @@ const app = express();
 app.use(express.json({ limit: '10mb' }));
 
 // CORS
-const FRONTEND_ORIGINS = (process.env.FRONTEND_ORIGIN || 'http://localhost:3000').split(',');
-app.use(cors({ origin: function(origin, callback) { if (!origin || FRONTEND_ORIGINS.indexOf(origin) !== -1) { callback(null, true); } else { callback(new Error('Not allowed by CORS')); } }, credentials: true }));
+const FRONTEND_ORIGIN_RAW = process.env.FRONTEND_ORIGIN || '';
+const FRONTEND_ORIGINS = FRONTEND_ORIGIN_RAW ? FRONTEND_ORIGIN_RAW.split(',') : [];
+app.use(cors({ origin: function(origin, callback) { if (!origin || FRONTEND_ORIGINS.length === 0 || FRONTEND_ORIGINS.indexOf(origin) !== -1) { callback(null, true); } else { callback(new Error('Not allowed by CORS')); } }, credentials: true }));
 
 // Health check
 app.get('/health', (req, res) => {
