@@ -108,7 +108,7 @@ app.post('/api/larp/generate', async (req, res) => {
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${OPENROUTER_KEY}`,
-        'HTTP-Referer': FRONTEND_ORIGIN_RAW || 'http://localhost:3000',
+        'HTTP-Referer': 'http://localhost:3000',
         'X-Title': 'Unvail'
       },
       body: JSON.stringify(body)
