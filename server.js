@@ -248,7 +248,7 @@ app.post('/api/larp/generate', async (req, res) => {
   }
 });
 
-// Start server - v2 with product research
+// Start server - v3 forced redeploy
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Unvail backend running on port ${PORT}`);
