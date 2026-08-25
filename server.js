@@ -179,24 +179,28 @@ app.post('/api/larp/generate', async (req, res) => {
 
     // === STEP 4: Build concise provider prompt ===
     const cameraDesc = scenePlan.camera_view === 'first-person phone-camera POV'
-      ? 'First-person view from the friend\'s iPhone camera looking at the subject. The friend is behind the camera and not visible.'
+      ? 'Casual handheld photo from a friend standing several feet away, holding a regular iPhone at chest height. The friend is invisible behind the camera. Normal 1x iPhone main camera perspective, approximately 24-28mm equivalent. Camera is about 5-8 feet from the subject. Not ultra-wide, not fisheye, not action-camera.'
       : scenePlan.camera_view === 'mirror reflection'
-      ? 'Mirror reflection showing the person holding the phone.'
-      : 'Handheld phone camera perspective.';
+      ? 'Mirror selfie showing the person holding the phone.'
+      : 'Handheld phone camera perspective, normal distance.';
 
-    const locationDesc = scenePlan.location === 'gas station' ? 'ordinary gas station with canopy, pumps, and pavement' :
+    const locationDesc = scenePlan.location === 'gas station' ? 'ordinary gas station with canopy, pumps, dry pavement, and normal concrete' :
       scenePlan.location === 'bedroom' ? 'ordinary bedroom with wooden floor' :
       scenePlan.location === 'hotel' ? 'hotel room interior' :
       scenePlan.location === 'garage' ? 'indoor parking garage' :
       scenePlan.location === 'urban street' ? 'urban street scene' : scenePlan.location;
 
-    const timeDesc = scenePlan.time === 'night' ? 'nighttime lighting with bright canopy lights and naturally dark surrounding areas' : 'natural daylight';
+    const timeDesc = scenePlan.time === 'night' ? 'nighttime: bright overhead canopy lights partially clipping to white, darker background streets, naturally mixed exposure, shadows under the vehicle remain dark' : 'natural daylight';
 
     let providerPrompt = cameraDesc;
     providerPrompt += `. ${scenePlan.subject}.`;
     providerPrompt += ` Location: ${locationDesc}.`;
     providerPrompt += ` Lighting: ${timeDesc}.`;
     if (scenePlan.action) providerPrompt += ` Action: ${scenePlan.action}.`;
+    providerPrompt += ' Clean casual iPhone camera-roll photo. Natural smartphone exposure. Dry pavement unless rain was requested.';
+    providerPrompt += ' No cinematic grading, no teal-and-orange, no wet reflective pavement, no professional lighting, no studio setup, no uniform grain overlay.';
+    providerPrompt += ' The image should look like a real casual photo taken by a person with their phone, not a 3D render or advertisement.';
+    providerPrompt += ' Noise should be exposure-dependent: bright areas relatively clean, dark areas with subtle luminance texture. Not uniform across the frame.';scenePlan.action}.`;
     providerPrompt += ' Clean handheld iPhone camera-roll framing, natural smartphone exposure, realistic depth, casual composition.';
     providerPrompt += ' No cinematic grading, no teal-and-orange, no wet pavement, no professional lighting, no studio setup.';
     providerPrompt += ' The image should look like a real photo taken by a person with their phone.';
