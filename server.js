@@ -7,8 +7,8 @@ const app = express();
 app.use(express.json({ limit: '10mb' }));
 
 // CORS
-const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || 'http://localhost:3000';
-app.use(cors({ origin: FRONTEND_ORIGIN, credentials: true }));
+const FRONTEND_ORIGINS = (process.env.FRONTEND_ORIGIN || 'http://localhost:3000').split(',');
+app.use(cors({ origin: function(origin, callback) { if (!origin || FRONTEND_ORIGINS.indexOf(origin) !== -1) { callback(null, true); } else { callback(new Error('Not allowed by CORS')); } }, credentials: true }));
 
 // Health check
 app.get('/health', (req, res) => {
