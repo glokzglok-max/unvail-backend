@@ -11,11 +11,8 @@ app.use(cors({ origin: true, credentials: true }));
 const BRAVE_KEY = process.env.BRAVE_SEARCH_API_KEY || '';
 const OPENROUTER_KEY = process.env.OPENROUTER_API_KEY || '';
 
-// ============================================================
-// HEALTH
-// ============================================================
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString(), braveConfigured: !!BRAVE_KEY, openrouterConfigured: !!OPENROUTER_KEY });
+  res.json({ status: 'ok', timestamp: new Date().toISOString(), brave: !!BRAVE_KEY, openrouter: !!OPENROUTER_KEY });
 });
 
 // ============================================================
@@ -60,6 +57,45 @@ async function downloadImage(url) {
   return { dataUrl: `data:${mime};base64,${b64}`, mime, size: buf.length, sha256: sha };
 }
 
+async function searchBrave(query, count = 5) {
+  if (!BRAVE_KEY) return { images: [], error: 'No BRAVE key' };
+  const res = await fetch(`https://api.search.brave.com/res/v1/images/search?q=${encodeURIComponent(query)}&count=${count}`, {
+    headers: { 'Accept': 'application/json', 'X-Subscription-Token': BRAVE_KEY }
+  });
+  if (!res.ok) return { images: [], error: `Brave ${res.status}` };
+  const data = await res.json();
+  return { images: (data.results || []).map(img => ({
+    url: img.properties?.url || img.thumbnail?.src || img.url,
+    title: img.title || '', source: img.source || ''
+  }))};
+}
+
+// ============================================================
+// NAMED OBJECT DETECTION
+// ============================================================
+const NAMED_OBJECTS = [
+  { pattern: /\b(lamborghini aventador svj|aventador svj|lamborghini svj|svj)\b/i, brand: 'Lamborghini', model: 'Aventador SVJ', category: 'vehicle', searchQueries: ['Lamborghini Aventador SVJ exterior front', 'Lamborghini Aventador SVJ interior dashboard', 'Lamborghini Aventador SVJ side profile'] },
+  { pattern: /\b(lamborghini revuelto)\b/i, brand: 'Lamborghini', model: 'Revuelto', category: 'vehicle', searchQueries: ['Lamborghini Revuelto exterior', 'Lamborghini Revuelto interior'] },
+  { pattern: /\b(balenciaga furry slides?|balenciaga fuzzy slides?)\b/i, brand: 'Balenciaga', model: 'Furry Slide', category: 'footwear', searchQueries: ['Balenciaga Furry Slide Black product'] },
+  { pattern: /\b(chrome hearts hoodie)\b/i, brand: 'Chrome Hearts', model: 'Hoodie', category: 'clothing', searchQueries: ['Chrome Hearts hoodie black'] },
+  { pattern: /\b(hellstar.*tee|hellstar.*shirt|hellstar.*path)\b/i, brand: 'Hellstar', model: 'Path to Paradise Tee', category: 'clothing', searchQueries: ['Hellstar Path to Paradise tee black red'] },
+  { pattern: /\b(rolex daytona)\b/i, brand: 'Rolex', model: 'Daytona', category: 'watch', searchQueries: ['Rolex Daytona panda'] },
+  { pattern: /\b(porsche 911)\b/i, brand: 'Porsche', model: '911', category: 'vehicle', searchQueries: ['Porsche 911 exterior', 'Porsche 911 interior'] },
+  { pattern: /\b(ferrari)\b/i, brand: 'Ferrari', model: 'Ferrari', category: 'vehicle', searchQueries: ['Ferrari sports car exterior'] },
+  { pattern: /\b(bentley)\b/i, brand: 'Bentley', model: 'Bentley', category: 'vehicle', searchQueries: ['Bentley luxury car exterior'] },
+  { pattern: /\b(rolls[\s-]royce)\b/i, brand: 'Rolls-Royce', model: 'Rolls-Royce', category: 'vehicle', searchQueries: ['Rolls Royce luxury car exterior'] }
+];
+
+function detectNamedObjects(prompt) {
+  const detected = [];
+  for (const obj of NAMED_OBJECTS) {
+    if (obj.pattern.test(prompt)) {
+      detected.push({ ...obj, match: prompt.match(obj.pattern)[0] });
+    }
+  }
+  return detected;
+}
+
 // ============================================================
 // LARP GENERATION
 // ============================================================
@@ -75,69 +111,43 @@ app.post('/api/larp/generate', async (req, res) => {
 
     const selectedModel = model || 'krea/krea-2-large';
     log(`Model: ${selectedModel}`);
-    log(`Prompt: ${prompt}`);
 
-    // === STEP 1: Parse scene plan ===
+    // === STEP 1: Parse scene ===
     const p = prompt.toLowerCase();
     const scenePlan = {
       camera_operator: 'friend',
       camera_operator_visible: false,
-      camera_device: 'ordinary recent iPhone main camera',
       camera_view: 'first-person phone-camera POV',
-      subject: prompt,
-      action: '',
       location: 'unknown',
       time: 'day',
+      action: '',
       products: []
     };
 
-    // Camera role interpretation
     if (/\b(friend recording|friend record|someone filming|friend took|my friend)\b/i.test(p)) {
-      scenePlan.camera_operator = 'friend';
-      scenePlan.camera_operator_visible = false;
       scenePlan.camera_view = 'first-person phone-camera POV';
+      scenePlan.camera_operator_visible = false;
     } else if (/\b(mirror|selfie)\b/i.test(p)) {
       scenePlan.camera_view = 'mirror reflection';
-      scenePlan.camera_operator_visible = true;
-    } else if (/\b(security|cctv|surveillance)\b/i.test(p)) {
-      scenePlan.camera_view = 'fixed security camera';
     } else if (/\b(I took|looking down|my phone)\b/i.test(p)) {
       scenePlan.camera_view = 'first-person holder POV';
     }
 
-    // Location
     if (/\b(gas station|pump|canopy)\b/i.test(p)) scenePlan.location = 'gas station';
-    else if (/\b(bedroom|bed room)\b/i.test(p)) scenePlan.location = 'bedroom';
+    else if (/\b(bedroom)\b/i.test(p)) scenePlan.location = 'bedroom';
     else if (/\b(hotel|resort)\b/i.test(p)) scenePlan.location = 'hotel';
     else if (/\b(garage|parking)\b/i.test(p)) scenePlan.location = 'garage';
     else if (/\b(street|road|city|miami)\b/i.test(p)) scenePlan.location = 'urban street';
 
-    // Time
     if (/\b(night|dark|evening|midnight|dusk)\b/i.test(p)) scenePlan.time = 'night';
-
-    // Action
     if (/\b(rev|revving|engine)\b/i.test(p)) scenePlan.action = 'revving the engine';
 
-    // === STEP 2: Detect and research products ===
-    const productPatterns = [
-      { regex: /\b(balenciaga furry slides?|balenciaga fuzzy slides?|furry slides?)\b/i, query: 'Balenciaga Furry Slide Black product photo' },
-      { regex: /\b(chrome hearts hoodie)\b/i, query: 'Chrome Hearts hoodie black product photo' },
-      { regex: /\b(hellstar.*tee|hellstar.*shirt|hellstar.*path)\b/i, query: 'Hellstar Path to Paradise tee black red product photo' },
-      { regex: /\b(lamborghini.*svj|svj|aventador svj)\b/i, query: 'Lamborghini Aventador SVJ product photo' },
-      { regex: /\b(lamborghini revuelto)\b/i, query: 'Lamborghini Revuelto product photo' },
-      { regex: /\b(louis vuitton.*sneaker|lv.*sneaker)\b/i, query: 'Louis Vuitton sneaker product photo' },
-      { regex: /\b(rolex daytona)\b/i, query: 'Rolex Daytona product photo' }
-    ];
+    // === STEP 2: Detect named objects ===
+    const namedObjects = detectNamedObjects(prompt);
+    scenePlan.products = namedObjects.map(o => o.match);
+    log(`Named objects: ${scenePlan.products.join(', ') || 'none'}`);
 
-    const detectedProducts = [];
-    for (const pat of productPatterns) {
-      const match = prompt.match(pat.regex);
-      if (match) detectedProducts.push({ match: match[0], query: pat.query });
-    }
-    scenePlan.products = detectedProducts.map(p => p.match);
-    log(`Products detected: ${scenePlan.products.join(', ') || 'none'}`);
-
-    // === STEP 3: Download references ===
+    // === STEP 3: Research and collect references ===
     const references = [];
 
     // User uploaded reference
@@ -149,37 +159,40 @@ app.post('/api/larp/generate', async (req, res) => {
       } catch (e) { log(`User ref failed: ${e.message}`); }
     }
 
-    // Research products
-    for (const product of detectedProducts) {
-      if (!BRAVE_KEY) { log(`Skipping research for ${product.match}: no BRAVE key`); continue; }
-      log(`Researching: ${product.query}`);
-      try {
-        const searchRes = await fetch(`https://api.search.brave.com/res/v1/images/search?q=${encodeURIComponent(product.query)}&count=5`, {
-          headers: { 'Accept': 'application/json', 'X-Subscription-Token': BRAVE_KEY }
-        });
-        if (!searchRes.ok) { log(`Brave failed: ${searchRes.status}`); continue; }
-        const data = await searchRes.json();
-        const images = (data.results || []).slice(0, 3);
-        log(`Found ${images.length} images for ${product.match}`);
-
-        if (images.length > 0) {
-          const best = images[0];
-          const imgUrl = best.properties?.url || best.thumbnail?.src || best.url;
-          log(`Selected: ${best.source} - ${best.title}`);
-          try {
-            const ref = await downloadImage(imgUrl);
-            references.push({ role: 'PRODUCT_REFERENCE', product: product.match, source: best.source, title: best.title, sourceUrl: imgUrl, ...ref });
-            log(`Downloaded: ${ref.size}b sha=${ref.sha256.slice(0, 12)}`);
-          } catch (e) { log(`Download failed: ${e.message}`); }
-        }
-      } catch (e) { log(`Research error: ${e.message}`); }
+    // Research each named object
+    for (const obj of namedObjects) {
+      if (!BRAVE_KEY) { log(`Skipping ${obj.match}: no BRAVE key`); continue; }
+      for (const query of obj.searchQueries) {
+        log(`Researching: ${query}`);
+        try {
+          const searchResult = await searchBrave(query, 3);
+          if (searchResult.images.length > 0) {
+            const best = searchResult.images[0];
+            log(`Selected: ${best.source} - ${best.title}`);
+            try {
+              const ref = await downloadImage(best.url);
+              references.push({
+                role: 'PRODUCT_REFERENCE',
+                product: obj.match,
+                brand: obj.brand,
+                model: obj.model,
+                source: best.source,
+                title: best.title,
+                sourceUrl: best.url,
+                ...ref
+              });
+              log(`Downloaded: ${ref.size}b sha=${ref.sha256.slice(0, 12)}`);
+            } catch (e) { log(`Download failed: ${e.message}`); }
+          }
+        } catch (e) { log(`Research error: ${e.message}`); }
+      }
     }
 
     log(`Total references: ${references.length}`);
 
     // === STEP 4: Build concise provider prompt ===
     const cameraDesc = scenePlan.camera_view === 'first-person phone-camera POV'
-      ? 'Casual handheld photo from a friend standing several feet away, holding a regular iPhone at chest height. The friend is invisible behind the camera. Normal 1x iPhone main camera perspective, approximately 24-28mm equivalent. Camera is about 5-8 feet from the subject. Not ultra-wide, not fisheye, not action-camera.'
+      ? 'Casual handheld photo from a friend standing several feet away, holding a regular iPhone at chest height. The friend is invisible behind the camera. Normal 1x iPhone main camera, approximately 24-28mm equivalent. Camera is about 5-8 feet from the subject.'
       : scenePlan.camera_view === 'mirror reflection'
       ? 'Mirror selfie showing the person holding the phone.'
       : 'Handheld phone camera perspective, normal distance.';
@@ -200,10 +213,13 @@ app.post('/api/larp/generate', async (req, res) => {
     providerPrompt += ' Clean casual iPhone camera-roll photo. Natural smartphone exposure. Dry pavement unless rain was requested.';
     providerPrompt += ' No cinematic grading, no teal-and-orange, no wet reflective pavement, no professional lighting, no studio setup, no uniform grain overlay.';
     providerPrompt += ' The image should look like a real casual photo taken by a person with their phone, not a 3D render or advertisement.';
-    providerPrompt += ' Noise should be exposure-dependent: bright areas relatively clean, dark areas with subtle luminance texture. Not uniform across the frame.';scenePlan.action}.`;
-    providerPrompt += ' Clean handheld iPhone camera-roll framing, natural smartphone exposure, realistic depth, casual composition.';
-    providerPrompt += ' No cinematic grading, no teal-and-orange, no wet pavement, no professional lighting, no studio setup.';
-    providerPrompt += ' The image should look like a real photo taken by a person with their phone.';
+    providerPrompt += ' Noise should be exposure-dependent: bright areas relatively clean, dark areas with subtle luminance texture. Not uniform across the frame.';
+
+    // Add product identity instruction
+    if (namedObjects.length > 0) {
+      const productNames = namedObjects.map(o => `the exact ${o.brand} ${o.model}`).join(', ');
+      providerPrompt += ` Preserve the exact identity and distinctive structural features of ${productNames}. Use the attached reference images to match the real product precisely.`;
+    }
 
     if (references.length > 0) {
       providerPrompt += ' Use the attached product reference images to preserve exact brand identity, materials, and design.';
@@ -215,7 +231,7 @@ app.post('/api/larp/generate', async (req, res) => {
     const body = { model: selectedModel, prompt: providerPrompt, n: 1 };
     if (aspectRatio) body.aspect_ratio = aspectRatio;
 
-    // Attach first reference
+    // Attach references (Krea supports one reference)
     if (references.length > 0) {
       body.reference_image = references[0].dataUrl;
       log(`Attached ref: ${references[0].role} ${references[0].size}b sha=${references[0].sha256.slice(0, 12)}`);
@@ -244,7 +260,7 @@ app.post('/api/larp/generate', async (req, res) => {
       imageUrl, model: selectedModel, requestId: rid,
       scenePlan: { camera: scenePlan.camera_view, location: scenePlan.location, time: scenePlan.time, products: scenePlan.products },
       referencesAttached: references.length,
-      researchResults: detectedProducts.map(p => ({ product: p.match, query: p.query })),
+      researchResults: namedObjects.map(o => ({ product: o.match, brand: o.brand, model: o.model })),
       cost: providerData.usage?.cost || null
     });
 
