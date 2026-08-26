@@ -153,7 +153,7 @@ app.post('/api/larp/generate', async (req, res) => {
     if (!prompt) return res.status(400).json({ error: 'prompt required', requestId: rid });
     if (!OPENROUTER_KEY) return res.status(500).json({ error: 'OPENROUTER_API_KEY not configured', requestId: rid });
 
-    const selectedModel = model || 'krea/krea-2-large';
+    const selectedModel = model || 'qwen/qwen-image-3-pro';
     log(`Model: ${selectedModel}`);
 
     // === STEP 1: Parse scene ===
@@ -203,7 +203,7 @@ app.post('/api/larp/generate', async (req, res) => {
       } catch (e) { log(`User ref failed: ${e.message}`); }
     }
 
-    // Krea 2 Large supports one reference. A user upload wins; otherwise find
+    // Use one canonical reference even though Qwen supports more. A user upload wins; otherwise find
     // one high-confidence canonical product image across all search results.
     for (const obj of namedObjects) {
       if (references.length > 0) break;
