@@ -345,18 +345,15 @@ app.post('/api/larp/generate', async (req, res) => {
       return { imageUrl, cost: Number(providerData.usage?.cost) || 0 };
     };
 
-    // Quality mode deliberately uses exactly three independent candidates.
-    const generated = await Promise.all([generateCandidate(), generateCandidate(), generateCandidate()]);
+    // Generate two alternatives, then use vision QA only to rank them. Never discard a
+    // paid generation solely because the reviewer is uncertain about a dark/tiny detail.
+    const generated = await Promise.all([generateCandidate(), generateCandidate()]);
     const assessed = await Promise.all(generated.map(async candidate => ({ ...candidate, qa: await assessCandidate(candidate.imageUrl, references, prompt, namedObjects) })));
     assessed.sort((a, b) => (Number(b.qa.pass) - Number(a.qa.pass)) || b.qa.score - a.qa.score);
     const best = assessed[0];
-    if (!best.qa.pass) {
-      log(`Quality gate rejected all three candidates; best score=${best.qa.score}`);
-      return res.status(422).json({ error: 'No candidate passed the realistic-image quality gate. Please retry.', requestId: rid, qualityMode: { candidates: 3, passed: false, score: best.qa.score, failures: best.qa.failures } });
-    }
     const imageUrl = best.imageUrl;
     const totalCost = assessed.reduce((sum, candidate) => sum + candidate.cost, 0);
-    log(`Quality gate selected score=${best.qa.score} pass=${best.qa.pass}; rejected=${assessed.filter(c => !c.qa.pass).length}; cost=$${totalCost || '?'}`);
+    log(`Quality review selected score=${best.qa.score} pass=${best.qa.pass}; alternate=${assessed[1]?.qa.score ?? '?'}; cost=$${totalCost || '?'}`);
 
     res.json({
       imageUrl, model: selectedModel, requestId: rid,
@@ -365,7 +362,7 @@ app.post('/api/larp/generate', async (req, res) => {
       referencesAttached: references.length,
       researchResults: namedObjects.map(o => ({ product: o.match, brand: o.brand, model: o.model })),
       cost: totalCost || null,
-      qualityMode: { candidates: 3, passed: best.qa.pass, score: best.qa.score, failures: best.qa.failures }
+      qualityMode: { candidates: 2, passed: best.qa.pass, score: best.qa.score, failures: best.qa.failures }
     });
 
   } catch (err) {
