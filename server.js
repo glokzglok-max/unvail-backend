@@ -12,7 +12,7 @@ const BRAVE_KEY = process.env.BRAVE_SEARCH_API_KEY || '';
 const OPENROUTER_KEY = process.env.OPENROUTER_API_KEY || '';
 
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString(), brave: !!BRAVE_KEY, openrouter: !!OPENROUTER_KEY });
+  res.json({ status: 'ok', timestamp: new Date().toISOString(), brave: !!BRAVE_KEY, openrouter: !!OPENROUTER_KEY, commit: process.env.RAILWAY_GIT_COMMIT_SHA || 'local' });
 });
 
 // ============================================================
