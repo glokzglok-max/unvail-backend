@@ -165,9 +165,9 @@ function imageUrlFromProvider(data) {
 }
 
 async function assessCandidate(candidateUrl, references, prompt, namedObjects) {
-  const content = [{ type: 'text', text: `You are a fail-closed photo quality gate. Candidate image is first; following images are factory identity references. Return JSON only in exactly this schema: {"score":0-100,"svj_identity":"pass|fail|not_applicable","visible_text":"pass|fail","license_plate":"pass|fail|not_visible","snapshot_realism":"pass|fail","failures":[string]}. Do not infer details that are not visibly clear. A candidate passes only if every applicable field is pass, its rear plate is not_visible or pass, and score is at least 88.
+  const content = [{ type: 'text', text: `You are a fail-closed photo quality gate. Candidate image is first; following images are factory identity references. Return JSON only in exactly this schema: {"score":0-100,"svj_identity":"pass|fail|not_applicable","visible_text":"pass|fail","license_plate":"pass|fail|not_visible","snapshot_realism":"pass|fail","failures":[string]}. Do not infer details that are not visibly clear. A candidate passes only if every applicable field is pass, its rear plate is not_visible or pass, and score is at least 80.
 
-VISIBLE-TEXT HARD GATE: reject any invented, misspelled, malformed, glowing, warped, or nonsensical text anywhere visible: badges, pump headers, prices, storefront signs, labels, screens, or plates. If text cannot be verified as ordinary coherent text, mark visible_text fail. Never forgive close-up badge errors.
+VISIBLE-TEXT HARD GATE: reject any readable invented, misspelled, malformed, glowing, warped, or nonsensical text: badges, pump headers, prices, storefront signs, labels, screens, or plates. Tiny, naturally out-of-focus, motion-blurred, or distant background text does not need to be readable and may pass; it must not visibly resemble fake glyphs. Never forgive close-up badge errors.
 
 LICENSE-PLATE HARD GATE: mark license_plate pass only for a small, unlit, non-blooming physical plate with a coherent one-line 5-8 character alphanumeric sequence. Mark fail for blank/washed-out plates, distorted characters, invented glyphs, texture-like writing, or conspicuously glowing plates. If it is naturally obscured, out of frame, or too distant to read, use not_visible.
 
@@ -196,7 +196,7 @@ SNAPSHOT HARD GATE: reject glossy automotive-ad/studio composition, impossible r
     if (!textPass) failures.push('Visible text did not pass');
     if (!platePass) failures.push('License plate did not pass');
     if (!realismPass) failures.push('Snapshot realism did not pass');
-    return { pass: identityPass && textPass && platePass && realismPass && score >= 88, score, failures };
+    return { pass: identityPass && textPass && platePass && realismPass && score >= 80, score, failures };
   } catch (error) {
     // Never fail open: an ungraded output is lower priority than a graded one.
     return { pass: false, score: 0, failures: [`QA unavailable: ${error.message}`] };
