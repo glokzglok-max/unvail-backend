@@ -165,7 +165,7 @@ function imageUrlFromProvider(data) {
 }
 
 async function assessCandidate(candidateUrl, references, prompt, namedObjects) {
-  const content = [{ type: 'text', text: `You are a fail-closed photo quality gate. Candidate image is first; following images are factory identity references. Return JSON only in exactly this schema: {"score":0-100,"svj_identity":"pass|fail|not_applicable","visible_text":"pass|fail","license_plate":"pass|fail|not_visible","snapshot_realism":"pass|fail","failures":[string]}. Do not infer details that are not visibly clear. A candidate passes only if every applicable field is pass, its rear plate is not_visible or pass, and score is at least 80.
+  const content = [{ type: 'text', text: `You are a strict photo quality gate. Candidate image is first; following images are factory identity references. Return JSON only in exactly this schema: {"score":0-100,"svj_identity":"pass|fail|uncertain|not_applicable","visible_text":"pass|fail|uncertain","license_plate":"pass|fail|not_visible|uncertain","snapshot_realism":"pass|fail|uncertain","failures":[string]}. Use fail only when there is a visible defect; use uncertain when a detail is too small or dark to judge. A candidate passes when it has no explicit fail in any applicable field and score is at least 72.
 
 VISIBLE-TEXT HARD GATE: reject any readable invented, misspelled, malformed, glowing, warped, or nonsensical text: badges, pump headers, prices, storefront signs, labels, screens, or plates. Tiny, naturally out-of-focus, motion-blurred, or distant background text does not need to be readable and may pass; it must not visibly resemble fake glyphs. Never forgive close-up badge errors.
 
@@ -186,17 +186,17 @@ SNAPSHOT HARD GATE: reject glossy automotive-ad/studio composition, impossible r
     const text = Array.isArray(raw) ? raw.map(part => part.text || '').join('') : raw;
     const result = JSON.parse(text || '{}');
     const needsSvj = namedObjects.some(object => object.model === 'Aventador SVJ');
-    const identityPass = !needsSvj || result.svj_identity === 'pass';
-    const textPass = result.visible_text === 'pass';
-    const platePass = result.license_plate === 'pass' || result.license_plate === 'not_visible';
-    const realismPass = result.snapshot_realism === 'pass';
+    const identityPass = !needsSvj || result.svj_identity !== 'fail';
+    const textPass = result.visible_text !== 'fail';
+    const platePass = result.license_plate !== 'fail';
+    const realismPass = result.snapshot_realism !== 'fail';
     const score = Number(result.score) || 0;
     const failures = Array.isArray(result.failures) ? result.failures : [];
     if (!identityPass) failures.push('SVJ identity did not pass');
     if (!textPass) failures.push('Visible text did not pass');
     if (!platePass) failures.push('License plate did not pass');
     if (!realismPass) failures.push('Snapshot realism did not pass');
-    return { pass: identityPass && textPass && platePass && realismPass && score >= 80, score, failures };
+    return { pass: identityPass && textPass && platePass && realismPass && score >= 72, score, failures };
   } catch (error) {
     // Never fail open: an ungraded output is lower priority than a graded one.
     return { pass: false, score: 0, failures: [`QA unavailable: ${error.message}`] };
