@@ -149,7 +149,7 @@ app.post('/api/larp/generate', async (req, res) => {
   log('LARP GENERATION STARTED');
 
   try {
-    const { prompt, realismPrompt, referenceImageUrl, model, aspectRatio } = req.body;
+    const { prompt, realismPrompt, referenceImageUrl, model, aspectRatio, dryRun } = req.body;
     if (!prompt) return res.status(400).json({ error: 'prompt required', requestId: rid });
     if (!OPENROUTER_KEY) return res.status(500).json({ error: 'OPENROUTER_API_KEY not configured', requestId: rid });
 
@@ -244,6 +244,18 @@ app.post('/api/larp/generate', async (req, res) => {
     }
 
     log(`Prompt: ${providerPrompt}`);
+
+    if (dryRun) {
+      const ref = references[0];
+      return res.json({
+        dryRun: true,
+        model: selectedModel,
+        scenePlan: { camera: scenePlan.camera_view, location: scenePlan.location, time: scenePlan.time, products: scenePlan.products },
+        providerPrompt,
+        referencesAttached: references.length,
+        selectedReference: ref ? { product: ref.product, brand: ref.brand, model: ref.model, source: ref.source, title: ref.title, sourceUrl: ref.sourceUrl, downloadedFrom: ref.downloadedFrom, score: ref.score, width: ref.width, height: ref.height, size: ref.size, sha256: ref.sha256 } : null
+      });
+    }
 
     // === STEP 5: Call OpenRouter ===
     const body = { model: selectedModel, prompt: providerPrompt, resolution: '1K' };
