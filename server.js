@@ -171,7 +171,7 @@ app.post('/api/larp/generate', async (req, res) => {
     if (!prompt) return res.status(400).json({ error: 'prompt required', requestId: rid });
     if (!OPENROUTER_KEY) return res.status(500).json({ error: 'OPENROUTER_API_KEY not configured', requestId: rid });
 
-    const selectedModel = model || 'qwen/qwen-image-3-pro';
+    const selectedModel = model || 'google/gemini-3-pro-image';
     log(`Model: ${selectedModel}`);
 
     // === STEP 1: Parse scene ===
@@ -278,7 +278,7 @@ app.post('/api/larp/generate', async (req, res) => {
     }
 
     // === STEP 5: Call OpenRouter ===
-    const body = { model: selectedModel, prompt: providerPrompt, resolution: '1K' };
+    const body = { model: selectedModel, prompt: providerPrompt, resolution: selectedModel === 'google/gemini-3-pro-image' ? '2K' : '1K' };
     if (aspectRatio) body.aspect_ratio = aspectRatio;
 
     // Qwen Image 3 Pro accepts up to four references; keep product views together.
