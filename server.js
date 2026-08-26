@@ -165,7 +165,15 @@ function imageUrlFromProvider(data) {
 }
 
 async function assessCandidate(candidateUrl, references, prompt, namedObjects) {
-  const content = [{ type: 'text', text: `You are a strict photo quality gate. Candidate image is first; following images are factory identity references. Return JSON only: {"pass":boolean,"score":0-100,"failures":[string]}. Reject if it has visible gibberish, invented/misspelled signage or prices, a staged automotive-ad composition, or incorrect product identity. LICENSE-PLATE HARD GATE: if a rear plate is visible, it must be a small, unlit, non-blooming physical plate with a coherent 5-8 character alphanumeric sequence in one line; reject blank rectangles, washed-out plates, warped characters, invented glyphs, or a plate that reads like texture. For Lamborghini Aventador SVJ, if the rear is visible it must retain the fixed ALA wing, high central triple exhaust, angular diffuser and thin Y-shaped taillights. User request: ${prompt}` }, { type: 'image_url', image_url: { url: candidateUrl } }];
+  const content = [{ type: 'text', text: `You are a fail-closed photo quality gate. Candidate image is first; following images are factory identity references. Return JSON only in exactly this schema: {"score":0-100,"svj_identity":"pass|fail|not_applicable","visible_text":"pass|fail","license_plate":"pass|fail|not_visible","snapshot_realism":"pass|fail","failures":[string]}. Do not infer details that are not visibly clear. A candidate passes only if every applicable field is pass, its rear plate is not_visible or pass, and score is at least 88.
+
+VISIBLE-TEXT HARD GATE: reject any invented, misspelled, malformed, glowing, warped, or nonsensical text anywhere visible: badges, pump headers, prices, storefront signs, labels, screens, or plates. If text cannot be verified as ordinary coherent text, mark visible_text fail. Never forgive close-up badge errors.
+
+LICENSE-PLATE HARD GATE: mark license_plate pass only for a small, unlit, non-blooming physical plate with a coherent one-line 5-8 character alphanumeric sequence. Mark fail for blank/washed-out plates, distorted characters, invented glyphs, texture-like writing, or conspicuously glowing plates. If it is naturally obscured, out of frame, or too distant to read, use not_visible.
+
+SVJ IDENTITY HARD GATE: when an Aventador SVJ is requested, mark svj_identity pass only if its visible body matches the supplied references. A visible rear requires the fixed ALA wing, high central triple exhaust, angular diffuser, and thin Y-shaped taillights. Reject a generic Aventador, Revuelto, or any wrong exhaust/rear layout.
+
+SNAPSHOT HARD GATE: reject glossy automotive-ad/studio composition, impossible reflections, or obviously generated lighting. User request: ${prompt}` }, { type: 'image_url', image_url: { url: candidateUrl } }];
   references.slice(0, 3).forEach(ref => content.push({ type: 'image_url', image_url: { url: ref.dataUrl } }));
   try {
     const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
@@ -177,7 +185,18 @@ async function assessCandidate(candidateUrl, references, prompt, namedObjects) {
     const raw = data.choices?.[0]?.message?.content;
     const text = Array.isArray(raw) ? raw.map(part => part.text || '').join('') : raw;
     const result = JSON.parse(text || '{}');
-    return { pass: result.pass === true && Number(result.score) >= 80, score: Number(result.score) || 0, failures: Array.isArray(result.failures) ? result.failures : [] };
+    const needsSvj = namedObjects.some(object => object.model === 'Aventador SVJ');
+    const identityPass = !needsSvj || result.svj_identity === 'pass';
+    const textPass = result.visible_text === 'pass';
+    const platePass = result.license_plate === 'pass' || result.license_plate === 'not_visible';
+    const realismPass = result.snapshot_realism === 'pass';
+    const score = Number(result.score) || 0;
+    const failures = Array.isArray(result.failures) ? result.failures : [];
+    if (!identityPass) failures.push('SVJ identity did not pass');
+    if (!textPass) failures.push('Visible text did not pass');
+    if (!platePass) failures.push('License plate did not pass');
+    if (!realismPass) failures.push('Snapshot realism did not pass');
+    return { pass: identityPass && textPass && platePass && realismPass && score >= 88, score, failures };
   } catch (error) {
     // Never fail open: an ungraded output is lower priority than a graded one.
     return { pass: false, score: 0, failures: [`QA unavailable: ${error.message}`] };
