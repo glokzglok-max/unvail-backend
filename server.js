@@ -12,7 +12,7 @@ const BRAVE_KEY = process.env.BRAVE_SEARCH_API_KEY || '';
 const OPENROUTER_KEY = process.env.OPENROUTER_API_KEY || '';
 
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString(), brave: !!BRAVE_KEY, openrouter: !!OPENROUTER_KEY, groundingVersion: 'brave-krea-v2', commit: process.env.RAILWAY_GIT_COMMIT_SHA || 'local' });
+  res.json({ status: 'ok', timestamp: new Date().toISOString(), brave: !!BRAVE_KEY, openrouter: !!OPENROUTER_KEY, groundingVersion: 'brave-qwen-v3', commit: process.env.RAILWAY_GIT_COMMIT_SHA || 'local' });
 });
 
 // ============================================================
@@ -91,7 +91,7 @@ function scoreReference(candidate, obj) {
   return score;
 }
 
-async function findCanonicalReference(obj, log) {
+async function findCanonicalReferences(obj, log, maxReferences = 3) {
   const candidates = [];
   for (const query of obj.searchQueries) {
     log(`Researching: ${query}`);
@@ -100,25 +100,43 @@ async function findCanonicalReference(obj, log) {
     result.images.forEach(image => candidates.push({ ...image, query, score: scoreReference(image, obj) }));
   }
   candidates.sort((a, b) => b.score - a.score);
-  for (const candidate of candidates.slice(0, 12)) {
+  const selected = [];
+  const usedUrls = new Set();
+  const usedQueries = new Set();
+  // Keep the reference set complementary: front, side, and rear search queries
+  // should not all collapse into variants of the same press image.
+  const byScore = [...candidates].sort((a, b) => b.score - a.score);
+  const orderedCandidates = [
+    // Start with the best result for each requested angle, then fall back to
+    // remaining strong results if one angle cannot be downloaded.
+    ...obj.searchQueries.flatMap(query => byScore.filter(candidate => candidate.query === query)),
+    ...byScore
+  ];
+  for (const candidate of orderedCandidates.slice(0, 24)) {
+    if (selected.length >= maxReferences || usedUrls.has(candidate.url)) continue;
     for (const url of [candidate.url, candidate.thumbnailUrl].filter(Boolean)) {
+      if (usedUrls.has(url)) continue;
       try {
         const downloaded = await downloadImage(url);
         log(`Grounding selected: score=${candidate.score} ${candidate.source} ${candidate.title}`);
-        return { ...candidate, ...downloaded, downloadedFrom: url };
+        selected.push({ ...candidate, ...downloaded, downloadedFrom: url });
+        usedUrls.add(candidate.url);
+        usedUrls.add(url);
+        usedQueries.add(candidate.query);
+        break;
       } catch (error) {
         log(`Grounding candidate skipped: ${error.message}`);
       }
     }
   }
-  return null;
+  return selected;
 }
 
 // ============================================================
 // NAMED OBJECT DETECTION
 // ============================================================
 const NAMED_OBJECTS = [
-  { pattern: /\b(lamborghini aventador svj|aventador svj|lamborghini svj|svj)\b/i, brand: 'Lamborghini', model: 'Aventador SVJ', category: 'vehicle', searchQueries: ['official Lamborghini Aventador SVJ coupe exterior press photo', 'Lamborghini Aventador SVJ factory side profile three quarter'] },
+  { pattern: /\b(lamborghini aventador svj|aventador svj|lamborghini svj|svj)\b/i, brand: 'Lamborghini', model: 'Aventador SVJ', category: 'vehicle', searchQueries: ['official Lamborghini Aventador SVJ front three quarter press photo', 'official Lamborghini Aventador SVJ side profile press photo', 'official Lamborghini Aventador SVJ rear three quarter press photo'] },
   { pattern: /\b(lamborghini revuelto)\b/i, brand: 'Lamborghini', model: 'Revuelto', category: 'vehicle', searchQueries: ['Lamborghini Revuelto exterior', 'Lamborghini Revuelto interior'] },
   { pattern: /\b(balenciaga furry slides?|balenciaga fuzzy slides?)\b/i, brand: 'Balenciaga', model: 'Furry Slide', category: 'footwear', searchQueries: ['Balenciaga Furry Slide Black product'] },
   { pattern: /\b(chrome hearts hoodie)\b/i, brand: 'Chrome Hearts', model: 'Hoodie', category: 'clothing', searchQueries: ['Chrome Hearts hoodie black'] },
@@ -203,14 +221,16 @@ app.post('/api/larp/generate', async (req, res) => {
       } catch (e) { log(`User ref failed: ${e.message}`); }
     }
 
-    // Use one canonical reference even though Qwen supports more. A user upload wins; otherwise find
-    // one high-confidence canonical product image across all search results.
+    // Qwen can take multiple image references. Use complementary factory views so
+    // a novel viewpoint does not turn the vehicle into a generic supercar.
     for (const obj of namedObjects) {
       if (references.length > 0) break;
       if (!BRAVE_KEY) { log(`Skipping ${obj.match}: no BRAVE key`); continue; }
       try {
-        const best = await findCanonicalReference(obj, log);
-        if (best) references.push({ role: 'PRODUCT_REFERENCE', product: obj.match, brand: obj.brand, model: obj.model, sourceUrl: best.url, ...best });
+        const matches = await findCanonicalReferences(obj, log);
+        for (const match of matches) {
+          references.push({ role: 'PRODUCT_REFERENCE', product: obj.match, brand: obj.brand, model: obj.model, sourceUrl: match.url, ...match });
+        }
       } catch (e) { log(`Research error: ${e.message}`); }
     }
 
@@ -253,7 +273,7 @@ app.post('/api/larp/generate', async (req, res) => {
         scenePlan: { camera: scenePlan.camera_view, location: scenePlan.location, time: scenePlan.time, products: scenePlan.products },
         providerPrompt,
         referencesAttached: references.length,
-        selectedReference: ref ? { product: ref.product, brand: ref.brand, model: ref.model, source: ref.source, title: ref.title, sourceUrl: ref.sourceUrl, downloadedFrom: ref.downloadedFrom, score: ref.score, width: ref.width, height: ref.height, size: ref.size, sha256: ref.sha256 } : null
+        selectedReferences: references.map(ref => ({ product: ref.product, brand: ref.brand, model: ref.model, source: ref.source, title: ref.title, sourceUrl: ref.sourceUrl, downloadedFrom: ref.downloadedFrom, score: ref.score, width: ref.width, height: ref.height, size: ref.size, sha256: ref.sha256 }))
       });
     }
 
@@ -261,10 +281,10 @@ app.post('/api/larp/generate', async (req, res) => {
     const body = { model: selectedModel, prompt: providerPrompt, resolution: '1K' };
     if (aspectRatio) body.aspect_ratio = aspectRatio;
 
-    // Attach references (Krea supports one reference)
+    // Qwen Image 3 Pro accepts up to four references; keep product views together.
     if (references.length > 0) {
-      body.input_references = [{ type: 'image_url', image_url: { url: references[0].dataUrl } }];
-      log(`Attached ref: ${references[0].role} ${references[0].size}b sha=${references[0].sha256.slice(0, 12)}`);
+      body.input_references = references.slice(0, 4).map(ref => ({ type: 'image_url', image_url: { url: ref.dataUrl } }));
+      log(`Attached ${body.input_references.length} reference image(s)`);
     }
 
     const providerRes = await fetch('https://openrouter.ai/api/v1/images', {
@@ -288,7 +308,7 @@ app.post('/api/larp/generate', async (req, res) => {
 
     res.json({
       imageUrl, model: selectedModel, requestId: rid,
-      groundingVersion: 'brave-krea-v2',
+      groundingVersion: 'brave-qwen-v3',
       scenePlan: { camera: scenePlan.camera_view, location: scenePlan.location, time: scenePlan.time, products: scenePlan.products },
       referencesAttached: references.length,
       researchResults: namedObjects.map(o => ({ product: o.match, brand: o.brand, model: o.model })),
