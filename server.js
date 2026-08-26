@@ -331,6 +331,10 @@ app.post('/api/larp/generate', async (req, res) => {
     const assessed = await Promise.all(generated.map(async candidate => ({ ...candidate, qa: await assessCandidate(candidate.imageUrl, references, prompt, namedObjects) })));
     assessed.sort((a, b) => (Number(b.qa.pass) - Number(a.qa.pass)) || b.qa.score - a.qa.score);
     const best = assessed[0];
+    if (!best.qa.pass) {
+      log(`Quality gate rejected all three candidates; best score=${best.qa.score}`);
+      return res.status(422).json({ error: 'No candidate passed the realistic-image quality gate. Please retry.', requestId: rid, qualityMode: { candidates: 3, passed: false, score: best.qa.score, failures: best.qa.failures } });
+    }
     const imageUrl = best.imageUrl;
     const totalCost = assessed.reduce((sum, candidate) => sum + candidate.cost, 0);
     log(`Quality gate selected score=${best.qa.score} pass=${best.qa.pass}; rejected=${assessed.filter(c => !c.qa.pass).length}; cost=$${totalCost || '?'}`);
