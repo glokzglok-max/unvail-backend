@@ -51,8 +51,11 @@ async function downloadImage(url) {
   const r = await fetch(url, { timeout: 15000 });
   if (!r.ok) throw new Error(`Download failed: ${r.status}`);
   const buf = await r.buffer();
-  const b64 = buf.toString('base64');
   const mime = r.headers.get('content-type') || 'image/jpeg';
+  if (!mime.startsWith('image/')) throw new Error(`Not an image: ${mime}`);
+  if (buf.length < 15000) throw new Error('Reference image is too small');
+  if (buf.length > 10 * 1024 * 1024) throw new Error('Reference image is too large');
+  const b64 = buf.toString('base64');
   const sha = crypto.createHash('sha256').update(buf).digest('hex');
   return { dataUrl: `data:${mime};base64,${b64}`, mime, size: buf.length, sha256: sha };
 }
@@ -66,15 +69,56 @@ async function searchBrave(query, count = 5) {
   const data = await res.json();
   return { images: (data.results || []).map(img => ({
     url: img.properties?.url || img.thumbnail?.src || img.url,
-    title: img.title || '', source: img.source || ''
+    thumbnailUrl: img.thumbnail?.src || img.properties?.placeholder || '',
+    width: img.properties?.width || img.width || 0,
+    height: img.properties?.height || img.height || 0,
+    title: img.title || '', source: img.source || '', pageUrl: img.url || ''
   }))};
+}
+
+function scoreReference(candidate, obj) {
+  const haystack = `${candidate.title} ${candidate.source} ${candidate.pageUrl} ${candidate.url}`.toLowerCase();
+  const exact = `${obj.brand} ${obj.model}`.toLowerCase();
+  let score = 0;
+  if (haystack.includes(exact)) score += 80;
+  if (haystack.includes(obj.model.toLowerCase())) score += 35;
+  if (/lamborghini\.com|media\.lamborghini\.com/.test(haystack)) score += 70;
+  if (/caranddriver|motortrend|topgear|roadandtrack|dupontregistry/.test(haystack)) score += 25;
+  if (/official|press|exterior|side profile|three-quarter/.test(haystack)) score += 15;
+  if (candidate.width >= 1000) score += 10;
+  if (candidate.width > candidate.height) score += 6;
+  if (/forza|gta|game|render|wallpaper|toy|lego|diecast|modified|replica/.test(haystack)) score -= 100;
+  return score;
+}
+
+async function findCanonicalReference(obj, log) {
+  const candidates = [];
+  for (const query of obj.searchQueries) {
+    log(`Researching: ${query}`);
+    const result = await searchBrave(query, 10);
+    if (result.error) log(`Brave warning: ${result.error}`);
+    result.images.forEach(image => candidates.push({ ...image, query, score: scoreReference(image, obj) }));
+  }
+  candidates.sort((a, b) => b.score - a.score);
+  for (const candidate of candidates.slice(0, 12)) {
+    for (const url of [candidate.url, candidate.thumbnailUrl].filter(Boolean)) {
+      try {
+        const downloaded = await downloadImage(url);
+        log(`Grounding selected: score=${candidate.score} ${candidate.source} ${candidate.title}`);
+        return { ...candidate, ...downloaded, downloadedFrom: url };
+      } catch (error) {
+        log(`Grounding candidate skipped: ${error.message}`);
+      }
+    }
+  }
+  return null;
 }
 
 // ============================================================
 // NAMED OBJECT DETECTION
 // ============================================================
 const NAMED_OBJECTS = [
-  { pattern: /\b(lamborghini aventador svj|aventador svj|lamborghini svj|svj)\b/i, brand: 'Lamborghini', model: 'Aventador SVJ', category: 'vehicle', searchQueries: ['Lamborghini Aventador SVJ exterior front', 'Lamborghini Aventador SVJ interior dashboard', 'Lamborghini Aventador SVJ side profile'] },
+  { pattern: /\b(lamborghini aventador svj|aventador svj|lamborghini svj|svj)\b/i, brand: 'Lamborghini', model: 'Aventador SVJ', category: 'vehicle', searchQueries: ['official Lamborghini Aventador SVJ coupe exterior press photo', 'Lamborghini Aventador SVJ factory side profile three quarter'] },
   { pattern: /\b(lamborghini revuelto)\b/i, brand: 'Lamborghini', model: 'Revuelto', category: 'vehicle', searchQueries: ['Lamborghini Revuelto exterior', 'Lamborghini Revuelto interior'] },
   { pattern: /\b(balenciaga furry slides?|balenciaga fuzzy slides?)\b/i, brand: 'Balenciaga', model: 'Furry Slide', category: 'footwear', searchQueries: ['Balenciaga Furry Slide Black product'] },
   { pattern: /\b(chrome hearts hoodie)\b/i, brand: 'Chrome Hearts', model: 'Hoodie', category: 'clothing', searchQueries: ['Chrome Hearts hoodie black'] },
@@ -105,7 +149,7 @@ app.post('/api/larp/generate', async (req, res) => {
   log('LARP GENERATION STARTED');
 
   try {
-    const { prompt, referenceImageUrl, model, aspectRatio } = req.body;
+    const { prompt, realismPrompt, referenceImageUrl, model, aspectRatio } = req.body;
     if (!prompt) return res.status(400).json({ error: 'prompt required', requestId: rid });
     if (!OPENROUTER_KEY) return res.status(500).json({ error: 'OPENROUTER_API_KEY not configured', requestId: rid });
 
@@ -159,33 +203,15 @@ app.post('/api/larp/generate', async (req, res) => {
       } catch (e) { log(`User ref failed: ${e.message}`); }
     }
 
-    // Research each named object
+    // Krea 2 Large supports one reference. A user upload wins; otherwise find
+    // one high-confidence canonical product image across all search results.
     for (const obj of namedObjects) {
+      if (references.length > 0) break;
       if (!BRAVE_KEY) { log(`Skipping ${obj.match}: no BRAVE key`); continue; }
-      for (const query of obj.searchQueries) {
-        log(`Researching: ${query}`);
-        try {
-          const searchResult = await searchBrave(query, 3);
-          if (searchResult.images.length > 0) {
-            const best = searchResult.images[0];
-            log(`Selected: ${best.source} - ${best.title}`);
-            try {
-              const ref = await downloadImage(best.url);
-              references.push({
-                role: 'PRODUCT_REFERENCE',
-                product: obj.match,
-                brand: obj.brand,
-                model: obj.model,
-                source: best.source,
-                title: best.title,
-                sourceUrl: best.url,
-                ...ref
-              });
-              log(`Downloaded: ${ref.size}b sha=${ref.sha256.slice(0, 12)}`);
-            } catch (e) { log(`Download failed: ${e.message}`); }
-          }
-        } catch (e) { log(`Research error: ${e.message}`); }
-      }
+      try {
+        const best = await findCanonicalReference(obj, log);
+        if (best) references.push({ role: 'PRODUCT_REFERENCE', product: obj.match, brand: obj.brand, model: obj.model, sourceUrl: best.url, ...best });
+      } catch (e) { log(`Research error: ${e.message}`); }
     }
 
     log(`Total references: ${references.length}`);
@@ -205,35 +231,27 @@ app.post('/api/larp/generate', async (req, res) => {
 
     const timeDesc = scenePlan.time === 'night' ? 'nighttime: bright overhead canopy lights partially clipping to white, darker background streets, naturally mixed exposure, shadows under the vehicle remain dark' : 'natural daylight';
 
-    let providerPrompt = cameraDesc;
-    providerPrompt += `. ${scenePlan.subject}.`;
-    providerPrompt += ` Location: ${locationDesc}.`;
-    providerPrompt += ` Lighting: ${timeDesc}.`;
-    if (scenePlan.action) providerPrompt += ` Action: ${scenePlan.action}.`;
-    providerPrompt += ' Clean casual iPhone camera-roll photo. Natural smartphone exposure. Dry pavement unless rain was requested.';
-    providerPrompt += ' No cinematic grading, no teal-and-orange, no wet reflective pavement, no professional lighting, no studio setup, no uniform grain overlay.';
-    providerPrompt += ' The image should look like a real casual photo taken by a person with their phone, not a 3D render or advertisement.';
-    providerPrompt += ' Noise should be exposure-dependent: bright areas relatively clean, dark areas with subtle luminance texture. Not uniform across the frame.';
+    let providerPrompt = (realismPrompt || prompt).trim();
 
     // Add product identity instruction
     if (namedObjects.length > 0) {
       const productNames = namedObjects.map(o => `the exact ${o.brand} ${o.model}`).join(', ');
-      providerPrompt += ` Preserve the exact identity and distinctive structural features of ${productNames}. Use the attached reference images to match the real product precisely.`;
+      providerPrompt += ` Preserve the exact identity and distinctive structural features of ${productNames}.`;
     }
 
     if (references.length > 0) {
-      providerPrompt += ' Use the attached product reference images to preserve exact brand identity, materials, and design.';
+      providerPrompt += ' Use the attached image only as an identity reference for factory shape, panels, vents, lights, wheels, wing, and proportions. Ignore its setting, angle, crop, lighting, and photographic style.';
     }
 
     log(`Prompt: ${providerPrompt}`);
 
     // === STEP 5: Call OpenRouter ===
-    const body = { model: selectedModel, prompt: providerPrompt, n: 1 };
+    const body = { model: selectedModel, prompt: providerPrompt, resolution: '1K' };
     if (aspectRatio) body.aspect_ratio = aspectRatio;
 
     // Attach references (Krea supports one reference)
     if (references.length > 0) {
-      body.reference_image = references[0].dataUrl;
+      body.input_references = [{ type: 'image_url', image_url: { url: references[0].dataUrl } }];
       log(`Attached ref: ${references[0].role} ${references[0].size}b sha=${references[0].sha256.slice(0, 12)}`);
     }
 
