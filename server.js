@@ -158,6 +158,32 @@ function detectNamedObjects(prompt) {
   return detected;
 }
 
+function imageUrlFromProvider(data) {
+  const item = data && data.data && data.data[0];
+  if (!item) return null;
+  return item.b64_json ? `data:${item.media_type || 'image/png'};base64,${item.b64_json}` : item.url;
+}
+
+async function assessCandidate(candidateUrl, references, prompt, namedObjects) {
+  const content = [{ type: 'text', text: `You are a strict photo quality gate. Candidate image is first; following images are factory identity references. Return JSON only: {"pass":boolean,"score":0-100,"failures":[string]}. Reject if it has visible gibberish, invented/misspelled signage or prices, a blank/glowing/malformed license plate, a staged automotive-ad composition, or incorrect product identity. For Lamborghini Aventador SVJ, if the rear is visible it must retain the fixed ALA wing, high central triple exhaust, angular diffuser and thin Y-shaped taillights. User request: ${prompt}` }, { type: 'image_url', image_url: { url: candidateUrl } }];
+  references.slice(0, 3).forEach(ref => content.push({ type: 'image_url', image_url: { url: ref.dataUrl } }));
+  try {
+    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${OPENROUTER_KEY}`, 'HTTP-Referer': 'http://localhost:3000', 'X-Title': 'Unvail Quality Gate' },
+      body: JSON.stringify({ model: 'google/gemini-3.7-flash', messages: [{ role: 'user', content }], temperature: 0, response_format: { type: 'json_object' } })
+    });
+    const data = await response.json();
+    const raw = data.choices?.[0]?.message?.content;
+    const text = Array.isArray(raw) ? raw.map(part => part.text || '').join('') : raw;
+    const result = JSON.parse(text || '{}');
+    return { pass: result.pass === true && Number(result.score) >= 80, score: Number(result.score) || 0, failures: Array.isArray(result.failures) ? result.failures : [] };
+  } catch (error) {
+    // Never fail open: an ungraded output is lower priority than a graded one.
+    return { pass: false, score: 0, failures: [`QA unavailable: ${error.message}`] };
+  }
+}
+
 // ============================================================
 // LARP GENERATION
 // ============================================================
@@ -287,24 +313,27 @@ app.post('/api/larp/generate', async (req, res) => {
       log(`Attached ${body.input_references.length} reference image(s)`);
     }
 
-    const providerRes = await fetch('https://openrouter.ai/api/v1/images', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${OPENROUTER_KEY}`, 'HTTP-Referer': 'http://localhost:3000', 'X-Title': 'Unvail Larp' },
-      body: JSON.stringify(body)
-    });
+    const generateCandidate = async () => {
+      const providerRes = await fetch('https://openrouter.ai/api/v1/images', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${OPENROUTER_KEY}`, 'HTTP-Referer': 'http://localhost:3000', 'X-Title': 'Unvail Larp' },
+        body: JSON.stringify(body)
+      });
+      const providerData = await providerRes.json();
+      if (!providerRes.ok) throw new Error(providerData.error?.message || 'Provider error');
+      const imageUrl = imageUrlFromProvider(providerData);
+      if (!imageUrl) throw new Error('Provider returned no image');
+      return { imageUrl, cost: Number(providerData.usage?.cost) || 0 };
+    };
 
-    const providerData = await providerRes.json();
-    if (!providerRes.ok) {
-      log(`Provider error: ${JSON.stringify(providerData.error || providerData).slice(0, 200)}`);
-      return res.status(providerRes.status).json({ error: providerData.error?.message || 'Provider error', requestId: rid });
-    }
-
-    let imageUrl = null;
-    if (providerData.data?.[0]) {
-      imageUrl = providerData.data[0].b64_json ? `data:${providerData.data[0].media_type || 'image/png'};base64,${providerData.data[0].b64_json}` : providerData.data[0].url;
-    }
-
-    log(`Done. Cost: $${providerData.usage?.cost || '?'}`);
+    // Quality mode deliberately uses exactly three independent candidates.
+    const generated = await Promise.all([generateCandidate(), generateCandidate(), generateCandidate()]);
+    const assessed = await Promise.all(generated.map(async candidate => ({ ...candidate, qa: await assessCandidate(candidate.imageUrl, references, prompt, namedObjects) })));
+    assessed.sort((a, b) => (Number(b.qa.pass) - Number(a.qa.pass)) || b.qa.score - a.qa.score);
+    const best = assessed[0];
+    const imageUrl = best.imageUrl;
+    const totalCost = assessed.reduce((sum, candidate) => sum + candidate.cost, 0);
+    log(`Quality gate selected score=${best.qa.score} pass=${best.qa.pass}; rejected=${assessed.filter(c => !c.qa.pass).length}; cost=$${totalCost || '?'}`);
 
     res.json({
       imageUrl, model: selectedModel, requestId: rid,
@@ -312,7 +341,8 @@ app.post('/api/larp/generate', async (req, res) => {
       scenePlan: { camera: scenePlan.camera_view, location: scenePlan.location, time: scenePlan.time, products: scenePlan.products },
       referencesAttached: references.length,
       researchResults: namedObjects.map(o => ({ product: o.match, brand: o.brand, model: o.model })),
-      cost: providerData.usage?.cost || null
+      cost: totalCost || null,
+      qualityMode: { candidates: 3, passed: best.qa.pass, score: best.qa.score, failures: best.qa.failures }
     });
 
   } catch (err) {
