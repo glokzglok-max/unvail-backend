@@ -12,7 +12,7 @@ const BRAVE_KEY = process.env.BRAVE_SEARCH_API_KEY || '';
 const OPENROUTER_KEY = process.env.OPENROUTER_API_KEY || '';
 
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString(), brave: !!BRAVE_KEY, openrouter: !!OPENROUTER_KEY, commit: process.env.RAILWAY_GIT_COMMIT_SHA || 'local' });
+  res.json({ status: 'ok', timestamp: new Date().toISOString(), brave: !!BRAVE_KEY, openrouter: !!OPENROUTER_KEY, groundingVersion: 'brave-krea-v2', commit: process.env.RAILWAY_GIT_COMMIT_SHA || 'local' });
 });
 
 // ============================================================
@@ -288,6 +288,7 @@ app.post('/api/larp/generate', async (req, res) => {
 
     res.json({
       imageUrl, model: selectedModel, requestId: rid,
+      groundingVersion: 'brave-krea-v2',
       scenePlan: { camera: scenePlan.camera_view, location: scenePlan.location, time: scenePlan.time, products: scenePlan.products },
       referencesAttached: references.length,
       researchResults: namedObjects.map(o => ({ product: o.match, brand: o.brand, model: o.model })),
