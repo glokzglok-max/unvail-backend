@@ -165,7 +165,7 @@ function imageUrlFromProvider(data) {
 }
 
 async function assessCandidate(candidateUrl, references, prompt, namedObjects) {
-  const content = [{ type: 'text', text: `You are a strict photo quality gate. Candidate image is first; following images are factory identity references. Return JSON only in exactly this schema: {"score":0-100,"svj_identity":"pass|fail|uncertain|not_applicable","visible_text":"pass|fail|uncertain","license_plate":"pass|fail|not_visible|uncertain","snapshot_realism":"pass|fail|uncertain","failures":[string]}. Use fail only when there is a visible defect; use uncertain when a detail is too small or dark to judge. A candidate passes when it has no explicit fail in any applicable field and score is at least 72.
+  const content = [{ type: 'text', text: `You are a strict photo quality gate. Candidate image is first; following images are factory identity references. Return JSON only in exactly this schema: {"score":0-100,"svj_identity":"pass|fail|uncertain|not_applicable","visible_text":"pass|fail|uncertain","license_plate":"pass|fail|not_visible|uncertain","plate_box":{"x":0,"y":0,"width":0,"height":0}|null,"snapshot_realism":"pass|fail|uncertain","failures":[string]}. plate_box is required only if a rear license plate is visible: give its tight bounding box in normalized 0-1000 image coordinates; otherwise use null. Use fail only when there is a visible defect; use uncertain when a detail is too small or dark to judge. A candidate passes when it has no explicit fail in any applicable field and score is at least 72.
 
 VISIBLE-TEXT HARD GATE: reject any readable invented, misspelled, malformed, glowing, warped, or nonsensical text: badges, pump headers, prices, storefront signs, labels, screens, or plates. Tiny, naturally out-of-focus, motion-blurred, or distant background text does not need to be readable and may pass; it must not visibly resemble fake glyphs. Never forgive close-up badge errors.
 
@@ -196,7 +196,10 @@ SNAPSHOT HARD GATE: reject glossy automotive-ad/studio composition, impossible r
     if (!textPass) failures.push('Visible text did not pass');
     if (!platePass) failures.push('License plate did not pass');
     if (!realismPass) failures.push('Snapshot realism did not pass');
-    return { pass: identityPass && textPass && platePass && realismPass && score >= 72, score, failures };
+    const rawBox = result.plate_box;
+    const validBox = rawBox && [rawBox.x, rawBox.y, rawBox.width, rawBox.height].every(value => Number.isFinite(Number(value))) && Number(rawBox.width) > 0 && Number(rawBox.height) > 0;
+    const plateBox = validBox ? { x: Math.max(0, Math.min(1000, Number(rawBox.x))), y: Math.max(0, Math.min(1000, Number(rawBox.y))), width: Math.max(1, Math.min(1000, Number(rawBox.width))), height: Math.max(1, Math.min(1000, Number(rawBox.height))) } : null;
+    return { pass: identityPass && textPass && platePass && realismPass && score >= 72, score, failures, plateBox };
   } catch (error) {
     // Never fail open: an ungraded output is lower priority than a graded one.
     return { pass: false, score: 0, failures: [`QA unavailable: ${error.message}`] };
@@ -362,7 +365,8 @@ app.post('/api/larp/generate', async (req, res) => {
       referencesAttached: references.length,
       researchResults: namedObjects.map(o => ({ product: o.match, brand: o.brand, model: o.model })),
       cost: totalCost || null,
-      qualityMode: { candidates: 2, passed: best.qa.pass, score: best.qa.score, failures: best.qa.failures }
+      qualityMode: { candidates: 2, passed: best.qa.pass, score: best.qa.score, failures: best.qa.failures },
+      plateBox: best.qa.plateBox || null
     });
 
   } catch (err) {
