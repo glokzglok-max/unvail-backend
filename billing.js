@@ -1,4 +1,6 @@
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 const { Pool } = require('pg');
 
 const pool = process.env.DATABASE_URL ? new Pool({
@@ -9,6 +11,12 @@ const pool = process.env.DATABASE_URL ? new Pool({
 
 const CREDIT_VALUE_USD = Number(process.env.CREDIT_VALUE_USD || 0.03333);
 const BILLING_MULTIPLIER = Number(process.env.BILLING_MULTIPLIER || 1.8);
+
+async function initializeSchema() {
+  if (!pool || process.env.AUTO_MIGRATE === 'false') return;
+  const sql = fs.readFileSync(path.join(__dirname, 'migrations', '001_billing.sql'), 'utf8');
+  await pool.query(sql);
+}
 
 async function ensureBillingUser(user) {
   if (!pool) throw new Error('DATABASE_URL is required for billing');
@@ -56,4 +64,4 @@ async function balance(userId) {
   return result.rows[0] || { available: 0, held: 0 };
 }
 
-module.exports = { pool, ensureBillingUser, creditsForCost, charge, balance, CREDIT_VALUE_USD, BILLING_MULTIPLIER };
+module.exports = { pool, initializeSchema, ensureBillingUser, creditsForCost, charge, balance, CREDIT_VALUE_USD, BILLING_MULTIPLIER };

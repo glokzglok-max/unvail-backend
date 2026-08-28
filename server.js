@@ -519,4 +519,11 @@ app.post('/api/larp/generate', requireAuth, async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, '0.0.0.0', () => console.log(`Unvail backend on port ${PORT}`));
+billing.initializeSchema()
+  .then(() => app.listen(PORT, '0.0.0.0', () => console.log(`Unvail backend on port ${PORT}`)))
+  .catch(error => {
+    // Keep health diagnostics available, but protected routes fail closed until
+    // the database is reachable and migrations can run.
+    console.error(`Billing schema initialization failed: ${error.message}`);
+    app.listen(PORT, '0.0.0.0', () => console.log(`Unvail backend on port ${PORT} (billing unavailable)`));
+  });
