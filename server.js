@@ -127,6 +127,19 @@ app.get('/api/credits/balance', requireAuth, async (req, res) => {
 app.get('/api/billing/status', requireAuth, async (req, res) => {
   try {
     const balance = await billing.balance(req.user.id);
+    let plan = 'none';
+    if (stripe && req.user.email) {
+      const customers = await stripe.customers.list({ email: req.user.email, limit: 100 });
+      const catalogByPrice = Object.entries(stripeCatalog)
+        .filter(([key]) => ['starter', 'creator', 'pro'].includes(key))
+        .reduce((map, [key, item]) => { if (item.price) map[item.price] = key; return map; }, {});
+      for (const customer of customers.data) {
+        const subscriptions = await stripe.subscriptions.list({ customer: customer.id, status: 'all', limit: 100 });
+        const active = subscriptions.data.find(sub => ['active', 'trialing', 'past_due'].includes(sub.status));
+        const matched = active?.items?.data?.map(item => catalogByPrice[item.price?.id]).find(Boolean);
+        if (matched) { plan = matched; break; }
+      }
+    }
     const latest = await billing.pool.query(
       `SELECT metadata->>'product' AS product
        FROM credit_ledger
@@ -134,7 +147,7 @@ app.get('/api/billing/status', requireAuth, async (req, res) => {
        ORDER BY created_at DESC LIMIT 1`,
       [req.user.id]
     );
-    return res.json({ ...balance, plan: latest.rows[0]?.product || 'none' });
+    return res.json({ ...balance, plan: plan !== 'none' ? plan : (latest.rows[0]?.product || 'none') });
   } catch (error) { return res.status(503).json({ error: 'Billing service unavailable' }); }
 });
 
