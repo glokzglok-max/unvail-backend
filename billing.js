@@ -87,6 +87,8 @@ async function settle(userId, reservationId, actualCostUsd, metadata = {}) {
     await client.query('BEGIN');
     const reservation = await client.query('SELECT amount FROM credit_ledger WHERE idempotency_key=$1 AND user_id=$2 FOR UPDATE', [`reservation:${reservationId}`, userId]);
     if (!reservation.rowCount) throw new Error('Reservation not found');
+    const prior = await client.query('SELECT amount FROM credit_ledger WHERE idempotency_key=$1 AND user_id=$2', [`settlement:${reservationId}`, userId]);
+    if (prior.rowCount) { await client.query('COMMIT'); return { settled: true, amount: Math.abs(Number(prior.rows[0].amount)), duplicate: true }; }
     const held = Math.abs(Number(reservation.rows[0].amount));
     if (actual > held) {
       const wallet = await client.query('SELECT available FROM credit_wallets WHERE user_id=$1 FOR UPDATE', [userId]);
@@ -102,10 +104,14 @@ async function settle(userId, reservationId, actualCostUsd, metadata = {}) {
   } catch (error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }
 }
 
+async function release(userId, reservationId) {
+  return settle(userId, reservationId, 0, { released: true });
+}
+
 async function balance(userId) {
   if (!pool) throw new Error('DATABASE_URL is required for billing');
   const result = await pool.query('SELECT available,held FROM credit_wallets WHERE user_id=$1', [userId]);
   return result.rows[0] || { available: 0, held: 0 };
 }
 
-module.exports = { pool, initializeSchema, ensureBillingUser, creditsForCost, charge, reserve, settle, balance, CREDIT_VALUE_USD, BILLING_MULTIPLIER };
+module.exports = { pool, initializeSchema, ensureBillingUser, creditsForCost, charge, reserve, settle, release, balance, CREDIT_VALUE_USD, BILLING_MULTIPLIER };

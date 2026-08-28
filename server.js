@@ -86,6 +86,7 @@ app.get('/api/credits/balance', requireAuth, async (req, res) => {
 // ============================================================
 app.post('/api/chat', requireAuth, async (req, res) => {
   const rid = crypto.randomUUID().slice(0, 8);
+  let reserved = false;
   try {
     if (!OPENROUTER_KEY) return res.status(500).json({ error: 'OPENROUTER_API_KEY not configured', requestId: rid });
     const history = Array.isArray(req.body?.messages) ? req.body.messages : [];
@@ -114,6 +115,9 @@ app.post('/api/chat', requireAuth, async (req, res) => {
       lite: 'google/gemma-3-12b-it'
     };
     const selectedModel = chatModels[req.body?.model] || chatModels.ultra;
+    const reservation = await billing.reserve(req.user.id, Number(process.env.CHAT_RESERVATION_CREDITS || 50), rid, { route: '/api/chat', model: selectedModel });
+    if (!reservation.reserved) return res.status(402).json({ error: 'Insufficient credits', requestId: rid });
+    reserved = true;
 
     const providerRes = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
@@ -138,8 +142,9 @@ app.post('/api/chat', requireAuth, async (req, res) => {
     const reply = data?.choices?.[0]?.message?.content;
     if (!reply) throw new Error('The chat model returned an empty response');
     const usageCost = Number(data?.usage?.cost) || 0;
-    const debit = await billing.charge(req.user.id, usageCost, rid, { route: '/api/chat', model: selectedModel });
-    if (!debit.charged) return res.status(402).json({ error: 'Insufficient credits', requestId: rid });
+    const debit = await billing.settle(req.user.id, rid, usageCost, { route: '/api/chat', model: selectedModel });
+    if (!debit.settled) return res.status(402).json({ error: 'Insufficient credits', requestId: rid });
+    reserved = false;
     res.json({
       reply,
       requestId: rid,
@@ -149,6 +154,7 @@ app.post('/api/chat', requireAuth, async (req, res) => {
       creditsCharged: debit.amount
     });
   } catch (err) {
+    if (reserved) { try { await billing.release(req.user.id, rid); } catch (releaseError) { console.error(`[${rid}] Reservation release failed:`, releaseError.message); } }
     console.error(`[${rid}] Chat error:`, err.message);
     res.status(500).json({ error: err.message, requestId: rid });
   }
@@ -351,6 +357,7 @@ SNAPSHOT HARD GATE: reject glossy automotive-ad/studio composition, impossible r
 app.post('/api/larp/generate', requireAuth, async (req, res) => {
   const rid = crypto.randomUUID().slice(0, 8);
   const log = (msg) => console.log(`[${rid}] ${msg}`);
+  let reserved = false;
   log('LARP GENERATION STARTED');
 
   try {
@@ -464,6 +471,10 @@ app.post('/api/larp/generate', requireAuth, async (req, res) => {
       });
     }
 
+    const reservation = await billing.reserve(req.user.id, Number(process.env.IMAGE_RESERVATION_CREDITS || 500), rid, { route: '/api/larp/generate', model: selectedModel });
+    if (!reservation.reserved) return res.status(402).json({ error: 'Insufficient credits', requestId: rid });
+    reserved = true;
+
     // === STEP 5: Call OpenRouter ===
     const body = { model: selectedModel, prompt: providerPrompt, resolution: selectedModel === 'google/gemini-3-pro-image-preview' ? '2K' : '1K' };
     if (aspectRatio) body.aspect_ratio = aspectRatio;
@@ -497,8 +508,9 @@ app.post('/api/larp/generate', requireAuth, async (req, res) => {
     const totalCost = assessed.reduce((sum, candidate) => sum + candidate.cost + (Number(candidate.qa?.costUsd) || 0), 0);
     log(`Quality review selected score=${best.qa.score} pass=${best.qa.pass}; alternate=${assessed[1]?.qa.score ?? '?'}; cost=$${totalCost || '?'}`);
 
-    const debit = await billing.charge(req.user.id, totalCost, rid, { route: '/api/larp/generate', model: selectedModel });
-    if (!debit.charged) return res.status(402).json({ error: 'Insufficient credits', requestId: rid });
+    const debit = await billing.settle(req.user.id, rid, totalCost, { route: '/api/larp/generate', model: selectedModel });
+    if (!debit.settled) return res.status(402).json({ error: 'Insufficient credits', requestId: rid });
+    reserved = false;
     res.json({
       imageUrl, model: selectedModel, requestId: rid,
       groundingVersion: 'brave-krea-v2',
@@ -513,6 +525,7 @@ app.post('/api/larp/generate', requireAuth, async (req, res) => {
     });
 
   } catch (err) {
+    if (reserved) { try { await billing.release(req.user.id, rid); } catch (releaseError) { log(`Reservation release failed: ${releaseError.message}`); } }
     log(`ERROR: ${err.message}`);
     res.status(500).json({ error: err.message, requestId: rid });
   }
