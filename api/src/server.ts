@@ -62,9 +62,10 @@ app.get('/v1/credits/history', { preHandler:[auth] }, async (req:any)=>{
 app.post('/v1/generation-quotes', { preHandler:[auth] }, async (req:any)=>{
   const { generation_type, model_id, settings } = req.body as any;
   // Validate, map tier to real model, load pricing snapshot (server-side)
-  const pricing = { provider_cost_micro: 50000, markup_bps: parseInt(process.env.DEFAULT_MARKUP_BPS||'20000') };
+  const pricing = { provider_cost_micro: 50000, markup_bps: parseInt(process.env.DEFAULT_MARKUP_BPS||'18000') };
   const retail = Math.ceil(pricing.provider_cost_micro * pricing.markup_bps / 10000);
-  const creditValue = parseInt(process.env.CREDIT_VALUE_MICRO_USD||'5000');
+  // Cheapest public credit anchor: Pro is $89.99 / 2,700 = $0.0333296/credit.
+  const creditValue = parseInt(process.env.CREDIT_VALUE_MICRO_USD||'33330');
   const credits = Math.ceil(retail / creditValue);
   const quote = { id: crypto.randomUUID(), user_id:req.user.id, generation_type, model_id, settings, credits_reserved:credits, expires_at: new Date(Date.now()+5*60*1000).toISOString() };
   // Persist quote (in-memory for demo, postgres in prod)

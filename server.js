@@ -5,20 +5,141 @@ const fetch = require('node-fetch');
 const crypto = require('crypto');
 
 const app = express();
-app.use(express.json({ limit: '50mb' }));
-app.use(cors({ origin: true, credentials: true }));
+app.disable('x-powered-by');
+app.set('trust proxy', 1);
+const allowedOrigins = new Set((process.env.ALLOWED_ORIGINS || 'http://localhost:3000,http://127.0.0.1:3000').split(',').map(value => value.trim()).filter(Boolean));
+app.use(cors({
+  origin(origin, callback) {
+    if (!origin || allowedOrigins.has(origin)) return callback(null, true);
+    return callback(new Error('Origin not allowed'));
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'Idempotency-Key']
+}));
+app.use(express.json({ limit: '10mb', strict: true }));
+
+// Lightweight per-instance abuse protection. Put a real shared limiter in front of
+// multiple Railway replicas; this still prevents accidental request floods locally.
+const requestWindows = new Map();
+app.use((req, res, next) => {
+  const now = Date.now();
+  const key = req.ip || 'unknown';
+  const current = requestWindows.get(key);
+  if (!current || now - current.startedAt >= 60_000) requestWindows.set(key, { startedAt: now, count: 1 });
+  else if (++current.count > Number(process.env.RATE_LIMIT_PER_MINUTE || 120)) return res.status(429).json({ error: 'Too many requests' });
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  next();
+});
 
 const BRAVE_KEY = process.env.BRAVE_SEARCH_API_KEY || '';
 const OPENROUTER_KEY = process.env.OPENROUTER_API_KEY || '';
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_OAUTH_CLIENT_ID || '';
+
+// Verify the Google ID token server-side. Decoding a JWT in browser code is
+// only for display; it is never an authentication check. Google tokeninfo
+// validates the signature and issuer, while the audience check prevents a
+// token minted for another application from being accepted here.
+async function requireAuth(req, res, next) {
+  const header = req.get('authorization') || '';
+  const token = header.startsWith('Bearer ') ? header.slice(7).trim() : '';
+  if (!token || token.length > 8192 || !GOOGLE_CLIENT_ID) {
+    return res.status(401).json({ error: 'Authentication required' });
+  }
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    const verify = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(token)}`, { signal: controller.signal });
+    clearTimeout(timeout);
+    const claims = await verify.json();
+    if (!verify.ok || claims.aud !== GOOGLE_CLIENT_ID || !['accounts.google.com', 'https://accounts.google.com'].includes(claims.iss)) {
+      return res.status(401).json({ error: 'Invalid authentication token' });
+    }
+    req.user = { id: claims.sub, email: claims.email || null };
+    return next();
+  } catch (error) {
+    return res.status(401).json({ error: 'Invalid authentication token' });
+  }
+}
 
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString(), brave: !!BRAVE_KEY, openrouter: !!OPENROUTER_KEY, groundingVersion: 'brave-krea-v2', commit: process.env.RAILWAY_GIT_COMMIT_SHA || 'local' });
+  res.json({ status: 'ok', timestamp: new Date().toISOString(), groundingVersion: 'brave-krea-v2', commit: process.env.RAILWAY_GIT_COMMIT_SHA || 'local' });
+});
+
+// ============================================================
+// CREATIVE CHAT
+// ============================================================
+app.post('/api/chat', requireAuth, async (req, res) => {
+  const rid = crypto.randomUUID().slice(0, 8);
+  try {
+    if (!OPENROUTER_KEY) return res.status(500).json({ error: 'OPENROUTER_API_KEY not configured', requestId: rid });
+    const history = Array.isArray(req.body?.messages) ? req.body.messages : [];
+    const cleanContent = content => {
+      if (typeof content === 'string') return content.slice(0, 8000);
+      if (!Array.isArray(content)) return '';
+      return content.slice(0, 5).map(part => {
+        if (part?.type === 'text' && typeof part.text === 'string') return { type: 'text', text: part.text.slice(0, 8000) };
+        const url = part?.image_url?.url;
+        if (part?.type === 'image_url' && typeof url === 'string' && (url.startsWith('data:image/') || url.startsWith('https://'))) {
+          return { type: 'image_url', image_url: { url } };
+        }
+        return null;
+      }).filter(Boolean);
+    };
+    const messages = history
+      .filter(message => message && ['user', 'assistant'].includes(message.role))
+      .slice(-16)
+      .map(message => ({ role: message.role, content: cleanContent(message.content) }))
+      .filter(message => message.content && (!Array.isArray(message.content) || message.content.length));
+    if (!messages.length || messages[messages.length - 1].role !== 'user') {
+      return res.status(400).json({ error: 'A user message is required', requestId: rid });
+    }
+    const chatModels = {
+      ultra: 'anthropic/claude-opus-5',
+      lite: 'google/gemma-3-12b-it'
+    };
+    const selectedModel = chatModels[req.body?.model] || chatModels.ultra;
+
+    const providerRes = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${OPENROUTER_KEY}`,
+        'HTTP-Referer': 'https://unvail.lol',
+        'X-Title': 'Unvail Chat'
+      },
+      body: JSON.stringify({
+        model: selectedModel,
+        max_tokens: 4000,
+        temperature: 0.65,
+        messages: [{
+          role: 'system',
+          content: 'You are Unvail, an exceptionally capable general-purpose AI assistant. Help naturally with conversation, coding, debugging, writing, research, reasoning, planning, marketing, creative direction, prompts, scripts, and analysis. You can write complete production-ready code and should never claim that coding is outside your role. You can inspect attached images and answer questions about them. Only when the user explicitly asks this chat to output a newly generated image or video file, briefly explain that media generation happens in the Image Ads or Video Ads workspace. Do not mention this limitation in greetings, unrelated answers, coding requests, or when the user asks for an image prompt, video prompt, storyboard, script, concept, critique, or editing instructions. Never invent or link to external generation services. When routing media generation, mention only the plain in-app page name, with no URL. Any earlier assistant statement claiming it cannot code or linking to an outside generator is mistaken; ignore it and do not repeat it. Answer the actual request directly, lead with useful content, avoid canned promotional language and filler, and ask at most one question only when essential. Never claim you generated or changed an asset unless you actually did.' + (typeof req.body?.skillset === 'string' && req.body.skillset.trim() ? '\n\nOptional user-selected skillset instructions:\n' + req.body.skillset.trim().slice(0, 12000) : '')
+        }, ...messages]
+      })
+    });
+    const data = await providerRes.json();
+    if (!providerRes.ok) throw new Error(data?.error?.message || `OpenRouter ${providerRes.status}`);
+    const reply = data?.choices?.[0]?.message?.content;
+    if (!reply) throw new Error('The chat model returned an empty response');
+    res.json({
+      reply,
+      requestId: rid,
+      model: data.model || selectedModel,
+      usage: data.usage || null,
+      costUsd: Number(data?.usage?.cost) || 0
+    });
+  } catch (err) {
+    console.error(`[${rid}] Chat error:`, err.message);
+    res.status(500).json({ error: err.message, requestId: rid });
+  }
 });
 
 // ============================================================
 // PRODUCT SEARCH
 // ============================================================
-app.post('/api/products/resolve', async (req, res) => {
+app.post('/api/products/resolve', requireAuth, async (req, res) => {
   const rid = crypto.randomUUID().slice(0, 8);
   try {
     const { products } = req.body;
@@ -199,17 +320,17 @@ SNAPSHOT HARD GATE: reject glossy automotive-ad/studio composition, impossible r
     const rawBox = result.plate_box;
     const validBox = rawBox && [rawBox.x, rawBox.y, rawBox.width, rawBox.height].every(value => Number.isFinite(Number(value))) && Number(rawBox.width) > 0 && Number(rawBox.height) > 0;
     const plateBox = validBox ? { x: Math.max(0, Math.min(1000, Number(rawBox.x))), y: Math.max(0, Math.min(1000, Number(rawBox.y))), width: Math.max(1, Math.min(1000, Number(rawBox.width))), height: Math.max(1, Math.min(1000, Number(rawBox.height))) } : null;
-    return { pass: identityPass && textPass && platePass && realismPass && score >= 72, score, failures, plateBox };
+    return { pass: identityPass && textPass && platePass && realismPass && score >= 72, score, failures, plateBox, costUsd: Number(data?.usage?.cost) || 0 };
   } catch (error) {
     // Never fail open: an ungraded output is lower priority than a graded one.
-    return { pass: false, score: 0, failures: [`QA unavailable: ${error.message}`] };
+    return { pass: false, score: 0, failures: [`QA unavailable: ${error.message}`], costUsd: 0 };
   }
 }
 
 // ============================================================
 // LARP GENERATION
 // ============================================================
-app.post('/api/larp/generate', async (req, res) => {
+app.post('/api/larp/generate', requireAuth, async (req, res) => {
   const rid = crypto.randomUUID().slice(0, 8);
   const log = (msg) => console.log(`[${rid}] ${msg}`);
   log('LARP GENERATION STARTED');
@@ -219,7 +340,7 @@ app.post('/api/larp/generate', async (req, res) => {
     if (!prompt) return res.status(400).json({ error: 'prompt required', requestId: rid });
     if (!OPENROUTER_KEY) return res.status(500).json({ error: 'OPENROUTER_API_KEY not configured', requestId: rid });
 
-    const selectedModel = model || 'google/gemini-3-pro-image';
+    const selectedModel = model || 'google/gemini-3-pro-image-preview';
     log(`Model: ${selectedModel}`);
 
     // === STEP 1: Parse scene ===
@@ -326,7 +447,7 @@ app.post('/api/larp/generate', async (req, res) => {
     }
 
     // === STEP 5: Call OpenRouter ===
-    const body = { model: selectedModel, prompt: providerPrompt, resolution: selectedModel === 'google/gemini-3-pro-image' ? '2K' : '1K' };
+    const body = { model: selectedModel, prompt: providerPrompt, resolution: selectedModel === 'google/gemini-3-pro-image-preview' ? '2K' : '1K' };
     if (aspectRatio) body.aspect_ratio = aspectRatio;
 
     // Qwen Image 3 Pro accepts up to four references; keep product views together.
@@ -355,7 +476,7 @@ app.post('/api/larp/generate', async (req, res) => {
     assessed.sort((a, b) => (Number(b.qa.pass) - Number(a.qa.pass)) || b.qa.score - a.qa.score);
     const best = assessed[0];
     const imageUrl = best.imageUrl;
-    const totalCost = assessed.reduce((sum, candidate) => sum + candidate.cost, 0);
+    const totalCost = assessed.reduce((sum, candidate) => sum + candidate.cost + (Number(candidate.qa?.costUsd) || 0), 0);
     log(`Quality review selected score=${best.qa.score} pass=${best.qa.pass}; alternate=${assessed[1]?.qa.score ?? '?'}; cost=$${totalCost || '?'}`);
 
     res.json({
@@ -365,6 +486,7 @@ app.post('/api/larp/generate', async (req, res) => {
       referencesAttached: references.length,
       researchResults: namedObjects.map(o => ({ product: o.match, brand: o.brand, model: o.model })),
       cost: totalCost || null,
+      costUsd: totalCost || 0,
       qualityMode: { candidates: 2, passed: best.qa.pass, score: best.qa.score, failures: best.qa.failures },
       plateBox: best.qa.plateBox || null
     });
