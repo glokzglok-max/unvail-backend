@@ -45,7 +45,10 @@ const GOOGLE_CLIENT_ID = process.env.GOOGLE_OAUTH_CLIENT_ID || '';
 async function requireAuth(req, res, next) {
   const header = req.get('authorization') || '';
   const token = header.startsWith('Bearer ') ? header.slice(7).trim() : '';
-  if (!token || token.length > 8192 || !GOOGLE_CLIENT_ID) {
+  if (!GOOGLE_CLIENT_ID) {
+    return res.status(503).json({ error: 'Authentication service is not configured' });
+  }
+  if (!token || token.length > 8192) {
     return res.status(401).json({ error: 'Authentication required' });
   }
   try {
