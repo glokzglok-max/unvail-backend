@@ -136,7 +136,7 @@ app.get('/api/billing/status', requireAuth, async (req, res) => {
       for (const customer of customers.data) {
         const subscriptions = await stripe.subscriptions.list({ customer: customer.id, status: 'all', limit: 100 });
         const active = subscriptions.data.find(sub => ['active', 'trialing', 'past_due'].includes(sub.status));
-        const matched = active?.items?.data?.map(item => catalogByPrice[item.price?.id]).find(Boolean);
+        const matched = active?.metadata?.product || active?.items?.data?.map(item => catalogByPrice[item.price?.id]).find(Boolean);
         if (matched) { plan = matched; break; }
       }
     }
