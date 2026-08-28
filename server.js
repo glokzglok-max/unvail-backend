@@ -28,7 +28,10 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
   catch (error) { return res.status(400).json({ error: 'Invalid Stripe signature' }); }
   try {
     const object = event.data.object;
-    if (event.type === 'checkout.session.completed' && object.payment_status === 'paid') {
+    // Stripe reports zero-dollar checkouts as `no_payment_required` rather
+    // than `paid`. Treat both as completed so free/test prices still fulfill
+    // the credits advertised by the catalog.
+    if (event.type === 'checkout.session.completed' && ['paid', 'no_payment_required'].includes(object.payment_status)) {
       const userId = object.metadata?.userId;
       const credits = Number(object.metadata?.credits || 0);
       if (userId && credits > 0) await billing.grant(userId, credits, event.id, { stripeEvent: event.type, sessionId: object.id, packageId: object.metadata?.packageId });
