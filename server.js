@@ -134,9 +134,11 @@ app.get('/api/billing/status', requireAuth, async (req, res) => {
         .filter(([key]) => ['starter', 'creator', 'pro'].includes(key))
         .reduce((map, [key, item]) => { if (item.price) map[item.price] = key; return map; }, {});
       for (const customer of customers.data) {
-        const subscriptions = await stripe.subscriptions.list({ customer: customer.id, status: 'all', limit: 100 });
+        const subscriptions = await stripe.subscriptions.list({ customer: customer.id, status: 'all', limit: 100, expand: ['data.items.data.price.product'] });
         const active = subscriptions.data.find(sub => ['active', 'trialing', 'past_due'].includes(sub.status));
-        const matched = active?.metadata?.product || active?.items?.data?.map(item => catalogByPrice[item.price?.id]).find(Boolean);
+        const productName = active?.items?.data?.map(item => item.price?.product?.name || '').find(Boolean) || '';
+        const matched = active?.metadata?.product || active?.items?.data?.map(item => catalogByPrice[item.price?.id]).find(Boolean) ||
+          (productName.toLowerCase().includes('starter') ? 'starter' : productName.toLowerCase().includes('creator') ? 'creator' : productName.toLowerCase().includes('pro') ? 'pro' : null);
         if (matched) { plan = matched; break; }
       }
     }
