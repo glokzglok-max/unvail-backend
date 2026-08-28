@@ -173,7 +173,7 @@ app.post('/api/stripe/checkout', requireAuth, async (req, res) => {
     const session = await stripe.checkout.sessions.create({
       mode: item.mode,
       line_items: [{ price: item.price, quantity: 1 }],
-      success_url: `${process.env.FRONTEND_ORIGIN || 'http://localhost:3000'}/dashboard.html?checkout=success`,
+      success_url: `${process.env.FRONTEND_ORIGIN || 'http://localhost:3000'}/dashboard.html?checkout=success&session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${process.env.FRONTEND_ORIGIN || 'http://localhost:3000'}/dashboard.html?checkout=cancelled`,
       customer_email: req.user.email || undefined,
       metadata: { userId: req.user.id, product: String(req.body.product), credits: String(item.credits) },
@@ -191,6 +191,27 @@ app.post('/api/stripe/checkout', requireAuth, async (req, res) => {
       code: error.code || error.type || 'stripe_error',
       requestId
     });
+  }
+});
+
+app.post('/api/stripe/checkout/confirm', requireAuth, async (req, res) => {
+  if (!stripe) return res.status(503).json({ error: 'Stripe is not configured' });
+  const sessionId = String(req.body?.sessionId || '');
+  if (!/^cs_[A-Za-z0-9_]+$/.test(sessionId)) return res.status(400).json({ error: 'Invalid checkout session' });
+  try {
+    const session = await stripe.checkout.sessions.retrieve(sessionId);
+    if (session.metadata?.userId !== req.user.id) return res.status(403).json({ error: 'Checkout session does not belong to this account' });
+    if (!['paid', 'no_payment_required'].includes(session.payment_status)) return res.status(409).json({ error: 'Checkout is not complete' });
+    const credits = Number(session.metadata?.credits || 0);
+    if (credits > 0) await billing.grant(req.user.id, credits, `confirm:${session.id}`, {
+      stripeEvent: 'checkout.session.completed', sessionId: session.id, mode: session.mode,
+      product: session.metadata?.product || null, paymentStatus: session.payment_status,
+      subscriptionId: session.subscription || null
+    });
+    return res.json({ confirmed: true, plan: session.metadata?.product || 'none', credits });
+  } catch (error) {
+    console.error('Stripe checkout confirmation failed:', error.message);
+    return res.status(502).json({ error: 'Unable to confirm checkout' });
   }
 });
 
