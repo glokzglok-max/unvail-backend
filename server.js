@@ -4,6 +4,8 @@ const cors = require('cors');
 const fetch = require('node-fetch');
 const crypto = require('crypto');
 const billing = require('./billing');
+const Stripe = require('stripe');
+const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SECRET_KEY) : null;
 
 const app = express();
 app.disable('x-powered-by');
@@ -18,6 +20,28 @@ app.use(cors({
   methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'Idempotency-Key']
 }));
+// Stripe must receive the untouched body for signature verification.
+app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
+  if (!stripe || !process.env.STRIPE_WEBHOOK_SECRET) return res.status(503).json({ error: 'Stripe is not configured' });
+  let event;
+  try { event = stripe.webhooks.constructEvent(req.body, req.get('stripe-signature'), process.env.STRIPE_WEBHOOK_SECRET); }
+  catch (error) { return res.status(400).json({ error: 'Invalid Stripe signature' }); }
+  try {
+    const object = event.data.object;
+    if (event.type === 'checkout.session.completed' && object.payment_status === 'paid') {
+      const userId = object.metadata?.userId;
+      const credits = Number(object.metadata?.credits || 0);
+      if (userId && credits > 0) await billing.grant(userId, credits, event.id, { stripeEvent: event.type, sessionId: object.id, packageId: object.metadata?.packageId });
+    }
+    if (event.type === 'invoice.paid') {
+      const userId = object.metadata?.userId;
+      const credits = Number(object.metadata?.credits || 0);
+      if (userId && credits > 0) await billing.grant(userId, credits, event.id, { stripeEvent: event.type, invoiceId: object.id });
+    }
+    return res.json({ received: true });
+  } catch (error) { console.error('Stripe fulfillment error:', error.message); return res.status(500).json({ error: 'Fulfillment failed' }); }
+});
+
 app.use(express.json({ limit: '10mb', strict: true }));
 
 // Lightweight per-instance abuse protection. Put a real shared limiter in front of
@@ -85,6 +109,36 @@ app.get('/health', (req, res) => {
 app.get('/api/credits/balance', requireAuth, async (req, res) => {
   try { return res.json(await billing.balance(req.user.id)); }
   catch (error) { return res.status(503).json({ error: 'Billing service unavailable' }); }
+});
+
+const stripeCatalog = {
+  starter: { price: process.env.STRIPE_PRICE_STARTER, credits: 250, mode: 'subscription' },
+  creator: { price: process.env.STRIPE_PRICE_CREATOR, credits: 800, mode: 'subscription' },
+  pro: { price: process.env.STRIPE_PRICE_PRO, credits: 2700, mode: 'subscription' },
+  topup200: { price: process.env.STRIPE_PRICE_TOPUP_200, credits: 200, mode: 'payment' },
+  topup500: { price: process.env.STRIPE_PRICE_TOPUP_500, credits: 500, mode: 'payment' },
+  topup1000: { price: process.env.STRIPE_PRICE_TOPUP_1000, credits: 1000, mode: 'payment' },
+  topup2500: { price: process.env.STRIPE_PRICE_TOPUP_2500, credits: 2500, mode: 'payment' },
+  topup5000: { price: process.env.STRIPE_PRICE_TOPUP_5000, credits: 5000, mode: 'payment' }
+};
+
+app.post('/api/stripe/checkout', requireAuth, async (req, res) => {
+  if (!stripe) return res.status(503).json({ error: 'Stripe is not configured' });
+  const item = stripeCatalog[String(req.body?.product || '').toLowerCase()];
+  if (!item?.price) return res.status(400).json({ error: 'Unknown or unconfigured product' });
+  try {
+    const session = await stripe.checkout.sessions.create({
+      mode: item.mode,
+      line_items: [{ price: item.price, quantity: 1 }],
+      success_url: `${process.env.FRONTEND_ORIGIN || 'http://localhost:3000'}/dashboard.html?checkout=success`,
+      cancel_url: `${process.env.FRONTEND_ORIGIN || 'http://localhost:3000'}/dashboard.html?checkout=cancelled`,
+      customer_email: req.user.email || undefined,
+      metadata: { userId: req.user.id, product: String(req.body.product), credits: String(item.credits) },
+      subscription_data: item.mode === 'subscription' ? { metadata: { userId: req.user.id, credits: String(item.credits), product: String(req.body.product) } } : undefined,
+      payment_intent_data: item.mode === 'payment' ? { metadata: { userId: req.user.id, credits: String(item.credits), product: String(req.body.product) } } : undefined
+    }, { idempotencyKey: `checkout:${req.user.id}:${String(req.body.product)}:${req.get('idempotency-key') || crypto.randomUUID()}` });
+    return res.json({ url: session.url, sessionId: session.id });
+  } catch (error) { return res.status(502).json({ error: 'Unable to create checkout session' }); }
 });
 
 // ============================================================

@@ -114,4 +114,22 @@ async function balance(userId) {
   return result.rows[0] || { available: 0, held: 0 };
 }
 
-module.exports = { pool, initializeSchema, ensureBillingUser, creditsForCost, charge, reserve, settle, release, balance, CREDIT_VALUE_USD, BILLING_MULTIPLIER };
+async function grant(userId, credits, sourceId, metadata = {}) {
+  if (!pool) throw new Error('DATABASE_URL is required for billing');
+  const amount = Number(credits);
+  if (!Number.isFinite(amount) || amount <= 0) throw new Error('Invalid grant amount');
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const inserted = await client.query(
+      `INSERT INTO credit_ledger (id,user_id,amount,entry_type,source_id,idempotency_key,metadata)
+       VALUES ($1,$2,$3,'PURCHASE',$4,$5,$6) ON CONFLICT (idempotency_key) DO NOTHING RETURNING id`,
+      [crypto.randomUUID(), userId, amount, sourceId, `grant:${sourceId}`, JSON.stringify(metadata)]
+    );
+    if (inserted.rowCount) await client.query('UPDATE credit_wallets SET available=available+$1, updated_at=now() WHERE user_id=$2', [amount, userId]);
+    await client.query('COMMIT');
+    return { granted: true, amount, duplicate: !inserted.rowCount };
+  } catch (error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }
+}
+
+module.exports = { pool, initializeSchema, ensureBillingUser, creditsForCost, charge, reserve, settle, release, balance, grant, CREDIT_VALUE_USD, BILLING_MULTIPLIER };
