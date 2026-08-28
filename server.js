@@ -126,6 +126,7 @@ app.post('/api/stripe/checkout', requireAuth, async (req, res) => {
   if (!stripe) return res.status(503).json({ error: 'Stripe is not configured' });
   const item = stripeCatalog[String(req.body?.product || '').toLowerCase()];
   if (!item?.price) return res.status(400).json({ error: 'Unknown or unconfigured product' });
+  const requestId = crypto.randomUUID().slice(0, 8);
   try {
     const session = await stripe.checkout.sessions.create({
       mode: item.mode,
@@ -138,7 +139,12 @@ app.post('/api/stripe/checkout', requireAuth, async (req, res) => {
       payment_intent_data: item.mode === 'payment' ? { metadata: { userId: req.user.id, credits: String(item.credits), product: String(req.body.product) } } : undefined
     }, { idempotencyKey: `checkout:${req.user.id}:${String(req.body.product)}:${req.get('idempotency-key') || crypto.randomUUID()}` });
     return res.json({ url: session.url, sessionId: session.id });
-  } catch (error) { return res.status(502).json({ error: 'Unable to create checkout session' }); }
+  } catch (error) {
+    // Keep provider details out of the browser response, but leave a precise
+    // Railway log entry so a bad price/account/mode configuration is fixable.
+    console.error(`[stripe-checkout:${requestId}] ${error.type || 'error'} ${error.code || ''} ${error.message || ''}`.trim());
+    return res.status(502).json({ error: 'Unable to create checkout session', requestId });
+  }
 });
 
 // ============================================================
