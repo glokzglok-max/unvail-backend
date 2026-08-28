@@ -143,7 +143,11 @@ app.post('/api/stripe/checkout', requireAuth, async (req, res) => {
     // Keep provider details out of the browser response, but leave a precise
     // Railway log entry so a bad price/account/mode configuration is fixable.
     console.error(`[stripe-checkout:${requestId}] ${error.type || 'error'} ${error.code || ''} ${error.message || ''}`.trim());
-    return res.status(502).json({ error: 'Unable to create checkout session', requestId });
+    return res.status(502).json({
+      error: 'Stripe rejected checkout',
+      code: error.code || error.type || 'stripe_error',
+      requestId
+    });
   }
 });
 
