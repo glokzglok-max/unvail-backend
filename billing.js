@@ -58,10 +58,54 @@ async function charge(userId, costUsd, sourceId, metadata = {}) {
   } catch (error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }
 }
 
+async function reserve(userId, credits, sourceId, metadata = {}) {
+  if (!pool) throw new Error('DATABASE_URL is required for billing');
+  const amount = Math.max(0, Number(credits));
+  if (!Number.isFinite(amount)) throw new Error('Invalid reservation amount');
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const wallet = await client.query('SELECT available FROM credit_wallets WHERE user_id=$1 FOR UPDATE', [userId]);
+    if (!wallet.rowCount || Number(wallet.rows[0].available) < amount) { await client.query('ROLLBACK'); return { reserved: false, amount }; }
+    const reservationId = `reservation:${sourceId}`;
+    const inserted = await client.query(
+      `INSERT INTO credit_ledger (id,user_id,amount,entry_type,source_id,idempotency_key,metadata)
+       VALUES ($1,$2,$3,'RESERVATION', $4, $5, $6) ON CONFLICT (idempotency_key) DO NOTHING RETURNING id`,
+      [crypto.randomUUID(), userId, -amount, sourceId, reservationId, JSON.stringify(metadata)]
+    );
+    if (inserted.rowCount) await client.query('UPDATE credit_wallets SET available=available-$1, held=held+$1, updated_at=now() WHERE user_id=$2', [amount, userId]);
+    await client.query('COMMIT');
+    return { reserved: true, amount, duplicate: !inserted.rowCount, reservationId };
+  } catch (error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }
+}
+
+async function settle(userId, reservationId, actualCostUsd, metadata = {}) {
+  if (!pool) throw new Error('DATABASE_URL is required for billing');
+  const actual = creditsForCost(actualCostUsd);
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const reservation = await client.query('SELECT amount FROM credit_ledger WHERE idempotency_key=$1 AND user_id=$2 FOR UPDATE', [`reservation:${reservationId}`, userId]);
+    if (!reservation.rowCount) throw new Error('Reservation not found');
+    const held = Math.abs(Number(reservation.rows[0].amount));
+    if (actual > held) {
+      const wallet = await client.query('SELECT available FROM credit_wallets WHERE user_id=$1 FOR UPDATE', [userId]);
+      const extra = actual - held;
+      if (!wallet.rowCount || Number(wallet.rows[0].available) < extra) { await client.query('ROLLBACK'); return { settled: false, reason: 'insufficient_credits', amount: actual }; }
+      await client.query('UPDATE credit_wallets SET available=available-$1, held=held-$2, updated_at=now() WHERE user_id=$3', [extra, held, userId]);
+    } else {
+      await client.query('UPDATE credit_wallets SET held=held-$1, available=available+$2, updated_at=now() WHERE user_id=$3', [held, held - actual, userId]);
+    }
+    await client.query('INSERT INTO credit_ledger (id,user_id,amount,entry_type,source_id,idempotency_key,metadata) VALUES ($1,$2,$3,\'SETTLEMENT\',$4,$5,$6) ON CONFLICT (idempotency_key) DO NOTHING', [crypto.randomUUID(), userId, -actual, reservationId, `settlement:${reservationId}`, JSON.stringify({ ...metadata, actualCostUsd })]);
+    await client.query('COMMIT');
+    return { settled: true, amount: actual };
+  } catch (error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }
+}
+
 async function balance(userId) {
   if (!pool) throw new Error('DATABASE_URL is required for billing');
   const result = await pool.query('SELECT available,held FROM credit_wallets WHERE user_id=$1', [userId]);
   return result.rows[0] || { available: 0, held: 0 };
 }
 
-module.exports = { pool, initializeSchema, ensureBillingUser, creditsForCost, charge, balance, CREDIT_VALUE_USD, BILLING_MULTIPLIER };
+module.exports = { pool, initializeSchema, ensureBillingUser, creditsForCost, charge, reserve, settle, balance, CREDIT_VALUE_USD, BILLING_MULTIPLIER };
