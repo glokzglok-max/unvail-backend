@@ -120,13 +120,27 @@ app.get('/health', (req, res) => {
 });
 
 app.get('/api/credits/balance', requireAuth, async (req, res) => {
-  try { return res.json(await billing.balance(req.user.id)); }
+  try {
+    const rows = await billing.pool.query(
+      `SELECT COALESCE(SUM(w.available),0) AS available, COALESCE(SUM(w.held),0) AS held
+       FROM credit_wallets w JOIN billing_users u ON u.id=w.user_id
+       WHERE u.id=$1 OR lower(u.email)=lower($2)`,
+      [req.user.id, req.user.email || '']
+    );
+    return res.json(rows.rows[0] || { available: 0, held: 0 });
+  }
   catch (error) { return res.status(503).json({ error: 'Billing service unavailable' }); }
 });
 
 app.get('/api/billing/status', requireAuth, async (req, res) => {
   try {
-    const balance = await billing.balance(req.user.id);
+    const balanceRows = await billing.pool.query(
+      `SELECT COALESCE(SUM(w.available),0) AS available, COALESCE(SUM(w.held),0) AS held
+       FROM credit_wallets w JOIN billing_users u ON u.id=w.user_id
+       WHERE u.id=$1 OR lower(u.email)=lower($2)`,
+      [req.user.id, req.user.email || '']
+    );
+    const balance = balanceRows.rows[0] || { available: 0, held: 0 };
     let plan = 'none';
     try {
       if (stripe && req.user.email) {
@@ -145,11 +159,13 @@ app.get('/api/billing/status', requireAuth, async (req, res) => {
       console.error('Stripe billing status lookup failed:', stripeError.message);
     }
     const latest = await billing.pool.query(
-      `SELECT metadata->>'product' AS product
+      `SELECT COALESCE(metadata->>'product', metadata->>'packageId') AS product
        FROM credit_ledger
-       WHERE user_id=$1 AND entry_type='PURCHASE' AND metadata->>'product' IN ('starter','creator','pro')
+       WHERE (user_id=$1 OR user_id IN (SELECT id FROM billing_users WHERE lower(email)=lower($2)))
+         AND entry_type='PURCHASE'
+         AND (metadata->>'product' IN ('starter','creator','pro') OR metadata->>'subscriptionId' IS NOT NULL)
        ORDER BY created_at DESC LIMIT 1`,
-      [req.user.id]
+      [req.user.id, req.user.email || '']
     );
     return res.json({ ...balance, plan: plan !== 'none' ? plan : (latest.rows[0]?.product || 'none') });
   } catch (error) { return res.status(503).json({ error: 'Billing service unavailable' }); }
