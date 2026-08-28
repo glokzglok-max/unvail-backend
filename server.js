@@ -34,7 +34,17 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
     if (event.type === 'checkout.session.completed' && ['paid', 'no_payment_required'].includes(object.payment_status)) {
       const userId = object.metadata?.userId;
       const credits = Number(object.metadata?.credits || 0);
-      if (userId && credits > 0) await billing.grant(userId, credits, event.id, { stripeEvent: event.type, sessionId: object.id, packageId: object.metadata?.packageId });
+      const product = object.metadata?.product || null;
+      const subscriptionId = object.subscription || null;
+      console.log(`[stripe-webhook] checkout mode=${object.mode} product=${product} payment_status=${object.payment_status} subscriptionId=${subscriptionId || 'none'}`);
+      if (object.mode === 'subscription' && !subscriptionId) {
+        console.warn(`[stripe-webhook] subscription checkout without subscription ID session=${object.id} product=${product}`);
+      }
+      if (userId && credits > 0) await billing.grant(userId, credits, event.id, {
+        stripeEvent: event.type, sessionId: object.id, mode: object.mode,
+        product, paymentStatus: object.payment_status, subscriptionId,
+        packageId: object.metadata?.packageId
+      });
     }
     if (event.type === 'invoice.paid') {
       const userId = object.metadata?.userId;
@@ -155,6 +165,7 @@ app.post('/api/stripe/checkout', requireAuth, async (req, res) => {
       subscription_data: item.mode === 'subscription' ? { metadata: { userId: req.user.id, credits: String(item.credits), product: String(req.body.product) } } : undefined,
       payment_intent_data: item.mode === 'payment' ? { metadata: { userId: req.user.id, credits: String(item.credits), product: String(req.body.product) } } : undefined
     }, { idempotencyKey: `checkout:${req.user.id}:${String(req.body.product)}:${req.get('idempotency-key') || crypto.randomUUID()}` });
+    console.log(`[stripe-checkout:${requestId}] mode=${item.mode} product=${String(req.body.product)} credits=${item.credits} sessionId=${session.id}`);
     return res.json({ url: session.url, sessionId: session.id });
   } catch (error) {
     // Keep provider details out of the browser response, but leave a precise
