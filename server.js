@@ -114,6 +114,20 @@ app.get('/api/credits/balance', requireAuth, async (req, res) => {
   catch (error) { return res.status(503).json({ error: 'Billing service unavailable' }); }
 });
 
+app.get('/api/billing/status', requireAuth, async (req, res) => {
+  try {
+    const balance = await billing.balance(req.user.id);
+    const latest = await billing.pool.query(
+      `SELECT metadata->>'product' AS product
+       FROM credit_ledger
+       WHERE user_id=$1 AND entry_type='PURCHASE' AND metadata->>'product' IN ('starter','creator','pro')
+       ORDER BY created_at DESC LIMIT 1`,
+      [req.user.id]
+    );
+    return res.json({ ...balance, plan: latest.rows[0]?.product || 'none' });
+  } catch (error) { return res.status(503).json({ error: 'Billing service unavailable' }); }
+});
+
 const stripeCatalog = {
   starter: { price: process.env.STRIPE_PRICE_STARTER, credits: 250, mode: 'subscription' },
   creator: { price: process.env.STRIPE_PRICE_CREATOR, credits: 800, mode: 'subscription' },
