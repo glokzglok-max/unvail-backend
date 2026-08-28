@@ -123,12 +123,14 @@ async function grant(userId, credits, sourceId, metadata = {}) {
     await client.query('BEGIN');
     const inserted = await client.query(
       `INSERT INTO credit_ledger (id,user_id,amount,entry_type,source_id,idempotency_key,metadata)
-       VALUES ($1,$2,$3,'PURCHASE',$4,$5,$6) ON CONFLICT (idempotency_key) DO NOTHING RETURNING id`,
+       VALUES ($1,$2,$3,'PURCHASE',$4,$5,$6)
+       ON CONFLICT (idempotency_key) DO UPDATE SET metadata=credit_ledger.metadata || EXCLUDED.metadata
+       RETURNING id, (xmax = 0) AS inserted`,
       [crypto.randomUUID(), userId, amount, sourceId, `grant:${sourceId}`, JSON.stringify(metadata)]
     );
-    if (inserted.rowCount) await client.query('UPDATE credit_wallets SET available=available+$1, updated_at=now() WHERE user_id=$2', [amount, userId]);
+    if (inserted.rows[0]?.inserted) await client.query('UPDATE credit_wallets SET available=available+$1, updated_at=now() WHERE user_id=$2', [amount, userId]);
     await client.query('COMMIT');
-    return { granted: true, amount, duplicate: !inserted.rowCount };
+    return { granted: true, amount, duplicate: !inserted.rows[0]?.inserted };
   } catch (error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }
 }
 
