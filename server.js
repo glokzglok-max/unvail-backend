@@ -3,6 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const fetch = require('node-fetch');
 const crypto = require('crypto');
+const billing = require('./billing');
 
 const app = express();
 app.disable('x-powered-by');
@@ -57,6 +58,14 @@ async function requireAuth(req, res, next) {
       return res.status(401).json({ error: 'Invalid authentication token' });
     }
     req.user = { id: claims.sub, email: claims.email || null };
+    // Fail closed in production: a provider request is never made without a
+    // durable wallet/ledger being available for the authenticated user.
+    try {
+      await billing.ensureBillingUser(req.user);
+    } catch (error) {
+      console.error('Billing database unavailable:', error.message);
+      return res.status(503).json({ error: 'Billing service unavailable' });
+    }
     return next();
   } catch (error) {
     return res.status(401).json({ error: 'Invalid authentication token' });
@@ -65,6 +74,11 @@ async function requireAuth(req, res, next) {
 
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString(), groundingVersion: 'brave-krea-v2', commit: process.env.RAILWAY_GIT_COMMIT_SHA || 'local' });
+});
+
+app.get('/api/credits/balance', requireAuth, async (req, res) => {
+  try { return res.json(await billing.balance(req.user.id)); }
+  catch (error) { return res.status(503).json({ error: 'Billing service unavailable' }); }
 });
 
 // ============================================================
@@ -123,12 +137,16 @@ app.post('/api/chat', requireAuth, async (req, res) => {
     if (!providerRes.ok) throw new Error(data?.error?.message || `OpenRouter ${providerRes.status}`);
     const reply = data?.choices?.[0]?.message?.content;
     if (!reply) throw new Error('The chat model returned an empty response');
+    const usageCost = Number(data?.usage?.cost) || 0;
+    const debit = await billing.charge(req.user.id, usageCost, rid, { route: '/api/chat', model: selectedModel });
+    if (!debit.charged) return res.status(402).json({ error: 'Insufficient credits', requestId: rid });
     res.json({
       reply,
       requestId: rid,
       model: data.model || selectedModel,
       usage: data.usage || null,
-      costUsd: Number(data?.usage?.cost) || 0
+      costUsd: usageCost,
+      creditsCharged: debit.amount
     });
   } catch (err) {
     console.error(`[${rid}] Chat error:`, err.message);
@@ -479,6 +497,8 @@ app.post('/api/larp/generate', requireAuth, async (req, res) => {
     const totalCost = assessed.reduce((sum, candidate) => sum + candidate.cost + (Number(candidate.qa?.costUsd) || 0), 0);
     log(`Quality review selected score=${best.qa.score} pass=${best.qa.pass}; alternate=${assessed[1]?.qa.score ?? '?'}; cost=$${totalCost || '?'}`);
 
+    const debit = await billing.charge(req.user.id, totalCost, rid, { route: '/api/larp/generate', model: selectedModel });
+    if (!debit.charged) return res.status(402).json({ error: 'Insufficient credits', requestId: rid });
     res.json({
       imageUrl, model: selectedModel, requestId: rid,
       groundingVersion: 'brave-krea-v2',
@@ -487,6 +507,7 @@ app.post('/api/larp/generate', requireAuth, async (req, res) => {
       researchResults: namedObjects.map(o => ({ product: o.match, brand: o.brand, model: o.model })),
       cost: totalCost || null,
       costUsd: totalCost || 0,
+      creditsCharged: debit.amount,
       qualityMode: { candidates: 2, passed: best.qa.pass, score: best.qa.score, failures: best.qa.failures },
       plateBox: best.qa.plateBox || null
     });
