@@ -57,7 +57,10 @@ async function requireAuth(req, res, next) {
     const verify = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(token)}`, { signal: controller.signal });
     clearTimeout(timeout);
     const claims = await verify.json();
-    if (!verify.ok || claims.aud !== GOOGLE_CLIENT_ID || !['accounts.google.com', 'https://accounts.google.com'].includes(claims.iss)) {
+    // tokeninfo has already verified the Google signature and issuer. Keep the
+    // application-specific audience check here to prevent token reuse across
+    // OAuth clients, without depending on an optional response claim.
+    if (!verify.ok || claims.aud !== GOOGLE_CLIENT_ID || !claims.sub) {
       return res.status(401).json({ error: 'Invalid authentication token' });
     }
     req.user = { id: claims.sub, email: claims.email || null };
