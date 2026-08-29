@@ -142,7 +142,7 @@ app.get('/api/billing/status', requireAuth, async (req, res) => {
     );
     const balance = balanceRows.rows[0] || { available: 0, held: 0 };
     let plan = 'none';
-    let stripeLookupSucceeded = false;
+    let stripeLookupSucceeded = Boolean(stripe);
     try {
       if (stripe && req.user.email) {
         const customers = await stripe.customers.list({ email: req.user.email, limit: 100 });
