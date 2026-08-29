@@ -142,9 +142,11 @@ app.get('/api/billing/status', requireAuth, async (req, res) => {
     );
     const balance = balanceRows.rows[0] || { available: 0, held: 0 };
     let plan = 'none';
+    let stripeLookupSucceeded = false;
     try {
       if (stripe && req.user.email) {
         const customers = await stripe.customers.list({ email: req.user.email, limit: 100 });
+        stripeLookupSucceeded = true;
         const catalogByPrice = Object.entries(stripeCatalog)
           .filter(([key]) => ['starter', 'creator', 'pro'].includes(key))
           .reduce((map, [key, item]) => { if (item.price) map[item.price] = key; return map; }, {});
@@ -167,11 +169,7 @@ app.get('/api/billing/status', requireAuth, async (req, res) => {
        ORDER BY created_at DESC LIMIT 1`,
       [req.user.id, req.user.email || '']
     );
-    if (plan === 'none' && latest.rows[0]?.product) plan = latest.rows[0].product;
-    // A completed Starter subscription always grants its 250-credit monthly
-    // allowance. This keeps status correct even if Stripe's customer lookup
-    // is temporarily unavailable.
-    if (plan === 'none' && Number(balance.available || 0) >= 250) plan = 'starter';
+    if (plan === 'none' && !stripeLookupSucceeded && latest.rows[0]?.product) plan = latest.rows[0].product;
     return res.json({ ...balance, plan });
   } catch (error) { return res.status(503).json({ error: 'Billing service unavailable' }); }
 });
