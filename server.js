@@ -161,7 +161,8 @@ app.get('/api/billing/status', requireAuth, async (req, res) => {
       console.error('Stripe billing status lookup failed:', stripeError.message);
     }
     const latest = await billing.pool.query(
-      `SELECT COALESCE(metadata->>'product', metadata->>'packageId') AS product
+      `SELECT COALESCE(metadata->>'product', metadata->>'packageId') AS product,
+              metadata->>'subscriptionId' AS subscription_id
        FROM credit_ledger
        WHERE (user_id=$1 OR user_id IN (SELECT id FROM billing_users WHERE lower(email)=lower($2)))
          AND entry_type='PURCHASE'
@@ -169,6 +170,12 @@ app.get('/api/billing/status', requireAuth, async (req, res) => {
        ORDER BY created_at DESC LIMIT 1`,
       [req.user.id, req.user.email || '']
     );
+    if (plan === 'none' && stripe && latest.rows[0]?.subscription_id) {
+      try {
+        const linked = await stripe.subscriptions.retrieve(latest.rows[0].subscription_id);
+        if (['active', 'trialing', 'past_due', 'incomplete'].includes(linked.status)) plan = latest.rows[0].product || 'starter';
+      } catch (error) { console.warn('[billing-status] linked subscription lookup failed:', error.message); }
+    }
     if (plan === 'none' && !stripeLookupSucceeded && latest.rows[0]?.product) plan = latest.rows[0].product;
     console.log(`[billing-status] user=${req.user.id} email=${req.user.email || ''} available=${balance.available} plan=${plan} stripeLookup=${stripeLookupSucceeded}`);
     return res.json({ ...balance, plan });
