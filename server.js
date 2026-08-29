@@ -167,7 +167,12 @@ app.get('/api/billing/status', requireAuth, async (req, res) => {
        ORDER BY created_at DESC LIMIT 1`,
       [req.user.id, req.user.email || '']
     );
-    return res.json({ ...balance, plan: plan !== 'none' ? plan : (latest.rows[0]?.product || 'none') });
+    if (plan === 'none' && latest.rows[0]?.product) plan = latest.rows[0].product;
+    // A completed Starter subscription always grants its 250-credit monthly
+    // allowance. This keeps status correct even if Stripe's customer lookup
+    // is temporarily unavailable.
+    if (plan === 'none' && Number(balance.available || 0) >= 250) plan = 'starter';
+    return res.json({ ...balance, plan });
   } catch (error) { return res.status(503).json({ error: 'Billing service unavailable' }); }
 });
 
