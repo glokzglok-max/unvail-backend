@@ -170,6 +170,7 @@ app.get('/api/billing/status', requireAuth, async (req, res) => {
       [req.user.id, req.user.email || '']
     );
     if (plan === 'none' && !stripeLookupSucceeded && latest.rows[0]?.product) plan = latest.rows[0].product;
+    console.log(`[billing-status] user=${req.user.id} email=${req.user.email || ''} available=${balance.available} plan=${plan} stripeLookup=${stripeLookupSucceeded}`);
     return res.json({ ...balance, plan });
   } catch (error) { return res.status(503).json({ error: 'Billing service unavailable' }); }
 });
