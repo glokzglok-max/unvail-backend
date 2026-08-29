@@ -236,6 +236,28 @@ app.post('/api/stripe/checkout/confirm', requireAuth, async (req, res) => {
   }
 });
 
+// Cancel the signed-in customer's active subscription in Stripe. Credits
+// already granted remain in the wallet; this only changes future billing.
+app.post('/api/stripe/subscription/cancel', requireAuth, async (req, res) => {
+  if (!stripe) return res.status(503).json({ error: 'Stripe is not configured' });
+  try {
+    const customers = await stripe.customers.list({ email: req.user.email, limit: 100 });
+    for (const customer of customers.data) {
+      const subscriptions = await stripe.subscriptions.list({ customer: customer.id, status: 'all', limit: 100 });
+      const active = subscriptions.data.find(sub => ['active', 'trialing', 'past_due'].includes(sub.status));
+      if (active) {
+        const canceled = await stripe.subscriptions.cancel(active.id);
+        console.log(`[stripe-cancel] user=${req.user.id} subscriptionId=${active.id} status=${canceled.status}`);
+        return res.json({ canceled: true, subscriptionId: active.id, status: canceled.status });
+      }
+    }
+    return res.status(404).json({ error: 'No active subscription found' });
+  } catch (error) {
+    console.error('[stripe-cancel] failed:', error.message);
+    return res.status(502).json({ error: 'Unable to cancel subscription' });
+  }
+});
+
 // ============================================================
 // CREATIVE CHAT
 // ============================================================
